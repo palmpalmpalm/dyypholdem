@@ -4,13 +4,14 @@ import torch
 import settings.arguments as arguments
 
 import nn.modules.module
-
+from nn.my_model import BaselineNN
 
 class ValueNn(object):
 
     model_info: dict
     model_state: dict
-    model: nn.modules.module
+    is_my_model: bool
+    model: object
 
     def __init__(self):
         self.model_info = {}
@@ -29,7 +30,13 @@ class ValueNn(object):
     # -- @param output An NxO tensor in which to store N sets of neural net outputs.
     # -- See @{net_builder} for details of each output.
     def get_value(self, inputs, output):
-        output.copy_(self.model.forward(inputs))
+        if self.is_my_model:
+            # print(inputs.unsqueeze(1).shape)
+            with torch.no_grad():
+                # print(self.model(inputs.unsqueeze(1)).squeeze(1).shape)
+                output.copy_(self.model(inputs.unsqueeze(1)).squeeze(1))            
+        else:
+            output.copy_(self.model.forward(inputs))
 
     def load_for_street(self, street, aux=False, training=False):
         if training:
@@ -41,11 +48,36 @@ class ValueNn(object):
             assert street == 1
             net_file = net_file + "preflop-aux/"
         else:
+            if (street == 3):
+                return self.load_river_model()    
             net_file += arguments.street_folders[street + 1]
         net_file = net_file + arguments.value_net_name
         net_file = net_file + ".tar"
 
         return self.load_from_file(net_file)
+    
+    def load_river_model(self):
+        self.is_my_model = True
+        
+        # Load my model
+        model_name = "baseline_model_1653567423.pth.tar"
+        arguments.timer.split_start(f"Loading neural network '{model_name}'", log_level="DEBUG")
+        river_model_path = arguments.street_folders[4] + model_name
+        
+        self.model = BaselineNN()
+        self.model.load_state_dict(torch.load(river_model_path)["model"])
+        
+        if arguments.device == torch.device('cpu'):
+            self.model.cpu()
+        else:
+            self.model.cuda()
+            
+        self.model.eval()
+        
+        print("LOADED MY MODEL")
+        
+        return self
+        
 
     def load_from_file(self, file_name: str):
 
@@ -78,6 +110,7 @@ class ValueNn(object):
 
         # setting model to evaluation mode
         self.model.evaluate()
+        self.is_my_model = False
 
         arguments.timer.split_stop("Network loaded in", log_level="LOADING")
 
