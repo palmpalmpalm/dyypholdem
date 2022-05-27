@@ -2,7 +2,7 @@
 import torch
 
 import settings.arguments as arguments
-
+import os
 import nn.modules.module
 from nn.my_model import BaselineNN
 
@@ -65,7 +65,7 @@ class ValueNn(object):
         river_model_path = arguments.street_folders[4] + model_name
         
         self.model = BaselineNN()
-        self.model.load_state_dict(torch.load(river_model_path)["model"])
+        self.model.load_state_dict(torch.load(os.path.abspath(arguments.model_path+river_model_path))["model"])
         
         if arguments.device == torch.device('cpu'):
             self.model.cpu()
