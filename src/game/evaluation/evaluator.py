@@ -21,7 +21,7 @@ class Evaluator(object):
 
     arguments.timer.start("Loading hand ranks lookup table...", log_level="TRACE")
 
-    _texas_lookup = torch.load("./game/evaluation/hand_ranks.pt").type(arguments.LongTensor)
+    _texas_lookup = torch.load("./game/evaluation/hand_ranks.pt", weights_only=False).type(arguments.LongTensor)
 
     arguments.timer.stop(message="Hand ranks lookup table initialized in:", log_level="TIMING")
 
