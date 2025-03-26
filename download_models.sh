@@ -10,6 +10,7 @@ files=(
   "1AjD1utFjn04v5IHWx1QUFXZWdwNxbgz7 src/nn/bucketing flop_dist_cats.pkl"
   "1gK82FqtSIghEPnkfvPmyoQxaE5O30rzZ src/nn/bucketing turn_dist_cats.pkl"
   "1X6PbbT2m7Dhr--IesIDy3kyPs0mDVuT- src/nn/bucketing river_ihr.pkl"
+  "1YVo-trelauiAQzZLWpSB78aoUIhkulCd src/nn/bucketing bucketing_data.sqlite"
   "1i9UC1dAE1IKkcYGarYV2ZLg1J1Qdnj7A data/models/preflop-aux final_gpu.tar"
   "1UkcKLZp-AvBZXV0r5WgA6LuqzZI3CHzb data/models/preflop-aux final_cpu.tar"
   "1Q-l7dkld7GsJ35G-sJiZmSDDPrpGsWHg data/models/flop final_gpu.tar"

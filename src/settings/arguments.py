@@ -33,7 +33,7 @@ value_net_name = 'final'
 # the extension of a neural net file
 value_net_extension = '.tar'
 # flag whether to use sqlite database for bucketing information (otherwise use data files)
-use_sqlite = False
+use_sqlite = True
 
 
 """Section CFR Iterations"""
@@ -67,7 +67,7 @@ resume_training = False
 
 """Section Torch"""
 # flag to use GPU for calculations
-use_gpu = True
+use_gpu = False
 # default tensor types
 if not use_gpu:
     Tensor = torch.FloatTensor
