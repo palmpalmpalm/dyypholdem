@@ -50,52 +50,30 @@ class NextRoundValue(object):
     # --- Initializes the tensor that translates hand ranges to bucket ranges.
     # -- @local
     def _init_bucketing(self, board):
+
         arguments.timer.split_start("Initialize bucketing for next round in neural network", log_level="TRACE")
 
-        # Time the setup phase
-        arguments.timer.split_start("Setup phase", log_level="TRACE")
         street = card_tools.board_to_street(board)
         self._street = street
-        arguments.timer.split_start("Get bucket count", log_level="DEBUG")
         self.bucket_count = bucketer.get_bucket_count(street+1)
-        arguments.timer.split_stop("Get bucket count", log_level="DEBUG")
-        
-        arguments.timer.split_start("Get next round boards", log_level="DEBUG")
         boards = card_tools.get_next_round_boards(board)
-        arguments.timer.split_stop("Get next round boards", log_level="DEBUG")
 
         self.board_count = boards.size(0)
-        
-        arguments.timer.split_start("Initialize range matrices", log_level="DEBUG")
-        self._range_matrix = arguments.Tensor(game_settings.hand_count, self.board_count * self.bucket_count).zero_()
+        self._range_matrix = arguments.Tensor(game_settings.hand_count, self.board_count * self.bucket_count ).zero_()
         self._range_matrix_board_view = self._range_matrix.view(game_settings.hand_count, self.board_count, self.bucket_count)
-        
-        # Pre-allocate tensors outside the loop
-        class_ids = torch.arange(1, self.bucket_count + 1, device=arguments.device)
-        class_ids = class_ids.view(1, self.bucket_count).expand(game_settings.hand_count, self.bucket_count)
-        arguments.timer.split_stop("Initialize range matrices", log_level="DEBUG")
-        arguments.timer.split_stop("Setup phase", log_level="TRACE")
-        
-        # Time the board processing loop
-        arguments.timer.split_start("Board processing loop", log_level="TRACE")
+
         for idx in range(0, self.board_count):
             board = boards[idx]
-            arguments.timer.split_start(f"Compute buckets for board {idx}", log_level="DEBUG")
             buckets = bucketer.compute_buckets(board)
-            arguments.timer.split_stop(f"Compute buckets for board {idx}", log_level="DEBUG")
-            
-            arguments.timer.split_start(f"Matrix operations for board {idx}", log_level="DEBUG")
-            # Reshape buckets only once
-            card_buckets = buckets.view(game_settings.hand_count, 1)
-            
-            # Use broadcasting for equality comparison
-            mask = (class_ids == card_buckets)
-            self._range_matrix_board_view[:, idx, :] = mask.to(self._range_matrix_board_view.dtype)
-            arguments.timer.split_stop(f"Matrix operations for board {idx}", log_level="DEBUG")
-        arguments.timer.split_stop("Board processing loop", log_level="TRACE")
-        
-        # Time the reverse value matrix creation
-        arguments.timer.split_start("Reverse value matrix creation", log_level="TRACE")
+
+            class_ids = arguments.Tensor()
+            torch.arange(1, self.bucket_count + 1, out=class_ids)
+            class_ids = class_ids.view(1, self.bucket_count).expand(game_settings.hand_count, self.bucket_count)
+            card_buckets = buckets.view(game_settings.hand_count, 1).expand(game_settings.hand_count, self.bucket_count)
+            # finding all strength classes
+            # matrix for transformation from card ranges to strength class ranges
+            self._range_matrix_board_view[:, idx, :][torch.eq(class_ids, card_buckets)] = 1
+
         # matrix for transformation from class values to card values
         self._reverse_value_matrix = self._range_matrix.t().clone()
 
@@ -106,7 +84,6 @@ class NextRoundValue(object):
         den = math.comb(game_settings.card_count - num_cur_cards - 2 * game_settings.hand_card_count, num_new_cards)
         weight_constant = 1/den
         self._reverse_value_matrix.mul_(weight_constant)
-        arguments.timer.split_stop("Reverse value matrix creation", log_level="TRACE")
 
         arguments.timer.split_stop("Bucketing time", log_level="TRACE")
 
