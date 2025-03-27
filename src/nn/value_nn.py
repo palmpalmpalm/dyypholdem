@@ -51,7 +51,7 @@ class ValueNn(object):
 
         arguments.timer.split_start(f"Loading neural network '{file_name}'", log_level="DEBUG")
 
-        saved_dict = torch.load(file_name)
+        saved_dict = torch.load(file_name, weights_only=False)
         self.__dict__.update(saved_dict)
 
         assert self.model, "no model found in file"
