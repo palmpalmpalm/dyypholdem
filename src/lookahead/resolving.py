@@ -1,4 +1,3 @@
-
 import settings.arguments as arguments
 
 from terminal_equity.terminal_equity import TerminalEquity
@@ -41,8 +40,9 @@ class Resolving(object):
     # -- @param player_range a range vector for the re-solving player
     # -- @param opponent_range a range vector for the opponent
     def resolve_first_node(self, node, player_range, opponent_range) -> ResolveResults:
-
-        arguments.logger.debug(f"Resolving first node with {arguments.cfr_iters} iterations")
+        # Get current street name for logging
+        street_name = self._get_street_name(node.board)
+        arguments.logger.debug(f"Resolving first node ({street_name}) with {arguments.cfr_iters} iterations")
 
         self.player_range = player_range
         self.opponent_range = opponent_range
@@ -60,9 +60,9 @@ class Resolving(object):
         self.lookahead.build_lookahead(self.lookahead_tree)
         arguments.timer.split_stop("Lookahead tree build time", log_level="TIMING")
 
-        arguments.timer.split_start(f"Resolving tree", log_level="TRACE")
+        arguments.timer.split_start(f"Resolving {street_name} tree", log_level="TRACE")
         self.lookahead.resolve_first_node(player_range, opponent_range)
-        arguments.timer.split_stop("Tree resolution time", log_level="TIMING")
+        arguments.timer.split_stop(f"{street_name} tree resolution time", log_level="TIMING")
 
         self.resolve_results = self.lookahead.get_results()
 
@@ -77,6 +77,10 @@ class Resolving(object):
     # -- before re-solving
     def resolve(self, node, player_range, opponent_cfvs):
         assert card_tools.is_valid_range(player_range, node.board)
+        
+        # Get current street name for logging
+        street_name = self._get_street_name(node.board)
+        arguments.logger.debug(f"Resolving node ({street_name})")
 
         self.player_range = player_range
         self.opponent_cfvs = opponent_cfvs
@@ -90,9 +94,9 @@ class Resolving(object):
         self.lookahead.build_lookahead(self.lookahead_tree)
         arguments.timer.split_stop("Tree build time", log_level="TIMING")
 
-        arguments.timer.split_start("Resolving node", log_level="TRACE")
+        arguments.timer.split_start(f"Resolving {street_name} node", log_level="TRACE")
         self.lookahead.resolve(player_range, opponent_cfvs)
-        arguments.timer.split_stop("Resolve time", log_level="TIMING")
+        arguments.timer.split_stop(f"{street_name} resolve time", log_level="TIMING")
 
         self.resolve_results = self.lookahead.get_results()
         return self.resolve_results
@@ -187,3 +191,19 @@ class Resolving(object):
                 action_id = i
         assert action_id != -1
         return action_id
+
+    # --- Helper method to get the current street name based on board cards
+    # -- @param board the current board cards
+    # -- @return a string representing the current street (preflop, flop, turn, river)
+    # -- @local
+    def _get_street_name(self, board):
+        if board is None or board.size(0) == 0:
+            return "preflop"
+        elif board.size(0) == 3:
+            return "flop"
+        elif board.size(0) == 4:
+            return "turn"
+        elif board.size(0) == 5:
+            return "river"
+        else:
+            return "unknown"
