@@ -187,7 +187,9 @@ def _compute_turn_buckets(board) -> torch.Tensor:
 
 def _compute_turn_buckets_sql(board) -> torch.Tensor:
     import sqlite3
-
+    
+    arguments.timer.start("Computing turn buckets (SQL)", log_level="TRACE")
+    
     buckets = arguments.Tensor(game_settings.hand_count).fill_(-1)
     _board = board.sort().values
     board_size = board.size(0)
@@ -198,6 +200,7 @@ def _compute_turn_buckets_sql(board) -> torch.Tensor:
         used[int(_board[i].item())] = 1
         hand[i + game_settings.hand_card_count] = int(_board[i].item())
 
+    arguments.timer.split_start(message="Turn SQL database operations", log_level="TRACE")
     select_str = "select * from turn_cats where turn_id=:_id"
     with sqlite3.connect("./nn/bucketing/bucketing_data.sqlite") as conn:
         cur = conn.cursor()
@@ -218,10 +221,15 @@ def _compute_turn_buckets_sql(board) -> torch.Tensor:
                         buckets[idx] = closest_mean[1]
                         used[card2] = 0
                 used[card1] = 0
+    arguments.timer.split_stop(message="Turn SQL database operations completed in", log_level="TRACE")
+    
+    arguments.timer.stop(message="Turn buckets (SQL) computed in", log_level="TIMING")
     return buckets
 
 
 def _compute_river_buckets(board) -> torch.Tensor:
+    arguments.timer.start("Computing river buckets", log_level="TRACE")
+    
     buckets = arguments.Tensor(game_settings.hand_count).fill_(-1)
     _board = board.sort().values
     board_size = board.size(0)
@@ -232,6 +240,7 @@ def _compute_river_buckets(board) -> torch.Tensor:
         used[int(_board[i].item())] = 1
         hand[i + game_settings.hand_card_count] = int(_board[i].item())
 
+    arguments.timer.split_start(message="River bucketing operations", log_level="TRACE")
     for card1 in range(0, game_settings.card_count):
         if used[card1] == 0:
             used[card1] = 1
@@ -253,12 +262,17 @@ def _compute_river_buckets(board) -> torch.Tensor:
                     buckets[idx] = river_bucket
                     used[card2] = 0
             used[card1] = 0
+    arguments.timer.split_stop(message="River bucketing operations completed in", log_level="TRACE")
+    
+    arguments.timer.stop(message="River buckets computed in", log_level="TIMING")
     return buckets
 
 
 def _compute_river_buckets_sql(board) -> torch.Tensor:
     import sqlite3
-
+    
+    arguments.timer.start("Computing river buckets (SQL)", log_level="TRACE")
+    
     buckets = arguments.Tensor(game_settings.hand_count).fill_(-1)
     _board = board.sort().values
     board_size = board.size(0)
@@ -269,6 +283,7 @@ def _compute_river_buckets_sql(board) -> torch.Tensor:
         used[int(_board[i].item())] = 1
         hand[i + game_settings.hand_card_count] = int(_board[i].item())
 
+    arguments.timer.split_start(message="River SQL database operations", log_level="TRACE")
     select_str = "select * from river_ihr where river_id=:_id"
     with sqlite3.connect("./nn/bucketing/bucketing_data.sqlite") as conn:
         cur = conn.cursor()
@@ -294,5 +309,8 @@ def _compute_river_buckets_sql(board) -> torch.Tensor:
                         buckets[idx] = river_bucket
                         used[card2] = 0
                 used[card1] = 0
+    arguments.timer.split_stop(message="River SQL database operations completed in", log_level="TRACE")
+    
+    arguments.timer.stop(message="River buckets (SQL) computed in", log_level="TIMING")
     return buckets
 

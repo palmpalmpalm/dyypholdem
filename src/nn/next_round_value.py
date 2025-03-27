@@ -76,67 +76,23 @@ class NextRoundValue(object):
         arguments.timer.split_stop("Initialize range matrices", log_level="DEBUG")
         arguments.timer.split_stop("Setup phase", log_level="TRACE")
         
-        # Time the board processing
-        arguments.timer.split_start("Board processing", log_level="TRACE")
-        
-        # Check if we should process in batches (on GPU) or individually (on CPU)
-        if arguments.device.type == 'cuda':
-            # Process all boards at once on GPU
-            arguments.timer.split_start("Compute buckets for all boards", log_level="DEBUG")
-            # Batch compute all buckets at once if possible
-            try:
-                all_buckets = bucketer.compute_buckets_batch(boards)
-                arguments.timer.split_stop("Compute buckets for all boards", log_level="DEBUG")
-                
-                arguments.timer.split_start("Matrix operations for all boards", log_level="DEBUG")
-                # Now we can process all boards at once
-                for idx in range(0, self.board_count):
-                    # Reshape buckets only once
-                    card_buckets = all_buckets[idx].view(game_settings.hand_count, 1)
-                    # Use broadcasting for equality comparison
-                    mask = (class_ids == card_buckets)
-                    self._range_matrix_board_view[:, idx, :] = mask.to(self._range_matrix_board_view.dtype)
-                arguments.timer.split_stop("Matrix operations for all boards", log_level="DEBUG")
+        # Time the board processing loop
+        arguments.timer.split_start("Board processing loop", log_level="TRACE")
+        for idx in range(0, self.board_count):
+            board = boards[idx]
+            arguments.timer.split_start(f"Compute buckets for board {idx}", log_level="DEBUG")
+            buckets = bucketer.compute_buckets(board)
+            arguments.timer.split_stop(f"Compute buckets for board {idx}", log_level="DEBUG")
             
-            # Fall back to original implementation if batch method isn't available
-            except (AttributeError, NotImplementedError):
-                # Compute buckets on CPU and transfer result to GPU
-                for idx in range(0, self.board_count):
-                    board = boards[idx]
-                    arguments.timer.split_start(f"Compute buckets for board {idx}", log_level="DEBUG")
-                    
-                    # Move computation to CPU, then move result back to GPU
-                    cpu_board = board.cpu() if hasattr(board, 'cpu') else board
-                    buckets = bucketer.compute_buckets(cpu_board).to(arguments.device)
-                    
-                    arguments.timer.split_stop(f"Compute buckets for board {idx}", log_level="DEBUG")
-                    
-                    arguments.timer.split_start(f"Matrix operations for board {idx}", log_level="DEBUG")
-                    # Reshape buckets only once
-                    card_buckets = buckets.view(game_settings.hand_count, 1)
-                    
-                    # Use broadcasting for equality comparison
-                    mask = (class_ids == card_buckets)
-                    self._range_matrix_board_view[:, idx, :] = mask.to(self._range_matrix_board_view.dtype)
-                    arguments.timer.split_stop(f"Matrix operations for board {idx}", log_level="DEBUG")
-        else:
-            # Original CPU implementation
-            for idx in range(0, self.board_count):
-                board = boards[idx]
-                arguments.timer.split_start(f"Compute buckets for board {idx}", log_level="DEBUG")
-                buckets = bucketer.compute_buckets(board)
-                arguments.timer.split_stop(f"Compute buckets for board {idx}", log_level="DEBUG")
-                
-                arguments.timer.split_start(f"Matrix operations for board {idx}", log_level="DEBUG")
-                # Reshape buckets only once
-                card_buckets = buckets.view(game_settings.hand_count, 1)
-                
-                # Use broadcasting for equality comparison
-                mask = (class_ids == card_buckets)
-                self._range_matrix_board_view[:, idx, :] = mask.to(self._range_matrix_board_view.dtype)
-                arguments.timer.split_stop(f"Matrix operations for board {idx}", log_level="DEBUG")
-        
-        arguments.timer.split_stop("Board processing", log_level="TRACE")
+            arguments.timer.split_start(f"Matrix operations for board {idx}", log_level="DEBUG")
+            # Reshape buckets only once
+            card_buckets = buckets.view(game_settings.hand_count, 1)
+            
+            # Use broadcasting for equality comparison
+            mask = (class_ids == card_buckets)
+            self._range_matrix_board_view[:, idx, :] = mask.to(self._range_matrix_board_view.dtype)
+            arguments.timer.split_stop(f"Matrix operations for board {idx}", log_level="DEBUG")
+        arguments.timer.split_stop("Board processing loop", log_level="TRACE")
         
         # Time the reverse value matrix creation
         arguments.timer.split_start("Reverse value matrix creation", log_level="TRACE")
