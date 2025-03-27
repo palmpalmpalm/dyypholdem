@@ -56,16 +56,24 @@ class NextRoundValue(object):
         arguments.timer.split_start("Setup phase", log_level="TRACE")
         street = card_tools.board_to_street(board)
         self._street = street
+        arguments.timer.split_start("Get bucket count", log_level="DEBUG")
         self.bucket_count = bucketer.get_bucket_count(street+1)
+        arguments.timer.split_stop("Get bucket count", log_level="DEBUG")
+        
+        arguments.timer.split_start("Get next round boards", log_level="DEBUG")
         boards = card_tools.get_next_round_boards(board)
+        arguments.timer.split_stop("Get next round boards", log_level="DEBUG")
 
         self.board_count = boards.size(0)
+        
+        arguments.timer.split_start("Initialize range matrices", log_level="DEBUG")
         self._range_matrix = arguments.Tensor(game_settings.hand_count, self.board_count * self.bucket_count).zero_()
         self._range_matrix_board_view = self._range_matrix.view(game_settings.hand_count, self.board_count, self.bucket_count)
         
         # Pre-allocate tensors outside the loop
         class_ids = torch.arange(1, self.bucket_count + 1, device=arguments.device)
         class_ids = class_ids.view(1, self.bucket_count).expand(game_settings.hand_count, self.bucket_count)
+        arguments.timer.split_stop("Initialize range matrices", log_level="DEBUG")
         arguments.timer.split_stop("Setup phase", log_level="TRACE")
         
         # Time the board processing loop
