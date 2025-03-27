@@ -33,7 +33,7 @@ value_net_name = 'final'
 # the extension of a neural net file
 value_net_extension = '.tar'
 # flag whether to use sqlite database for bucketing information (otherwise use data files)
-use_sqlite = True
+use_sqlite = False
 
 
 """Section CFR Iterations"""
