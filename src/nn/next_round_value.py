@@ -50,7 +50,6 @@ class NextRoundValue(object):
     # --- Initializes the tensor that translates hand ranges to bucket ranges.
     # -- @local
     def _init_bucketing(self, board):
-
         arguments.timer.split_start("Initialize bucketing for next round in neural network", log_level="TRACE")
 
         street = card_tools.board_to_street(board)
@@ -59,21 +58,26 @@ class NextRoundValue(object):
         boards = card_tools.get_next_round_boards(board)
 
         self.board_count = boards.size(0)
-        self._range_matrix = arguments.Tensor(game_settings.hand_count, self.board_count * self.bucket_count ).zero_()
+        self._range_matrix = arguments.Tensor(game_settings.hand_count, self.board_count * self.bucket_count).zero_()
         self._range_matrix_board_view = self._range_matrix.view(game_settings.hand_count, self.board_count, self.bucket_count)
-
+        
+        # Pre-allocate tensors outside the loop
+        class_ids = torch.arange(1, self.bucket_count + 1, device=arguments.device)
+        class_ids = class_ids.view(1, self.bucket_count).expand(game_settings.hand_count, self.bucket_count)
+        
+        # Try to process boards in batches if bucketer.compute_buckets supports it
+        # Otherwise, vectorize the loop as much as possible
         for idx in range(0, self.board_count):
             board = boards[idx]
             buckets = bucketer.compute_buckets(board)
-
-            class_ids = arguments.Tensor()
-            torch.arange(1, self.bucket_count + 1, out=class_ids)
-            class_ids = class_ids.view(1, self.bucket_count).expand(game_settings.hand_count, self.bucket_count)
-            card_buckets = buckets.view(game_settings.hand_count, 1).expand(game_settings.hand_count, self.bucket_count)
-            # finding all strength classes
-            # matrix for transformation from card ranges to strength class ranges
-            self._range_matrix_board_view[:, idx, :][torch.eq(class_ids, card_buckets)] = 1
-
+            
+            # Reshape buckets only once
+            card_buckets = buckets.view(game_settings.hand_count, 1)
+            
+            # Use broadcasting for equality comparison
+            mask = (class_ids == card_buckets)
+            self._range_matrix_board_view[:, idx, :] = mask.to(self._range_matrix_board_view.dtype)
+        
         # matrix for transformation from class values to card values
         self._reverse_value_matrix = self._range_matrix.t().clone()
 
