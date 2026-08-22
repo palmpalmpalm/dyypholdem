@@ -23,6 +23,35 @@ DyypHoldem runs with the following components. It has been tested on both Linux 
 - [Loguru module](https://github.com/Delgan/loguru) for extended logging. It can be installed via `pip install loguru`. If needed, the logging output can be directed to `stdout` only by setting the flag `use_loguru = False` in `settings/arguments.py`.
 
 
+## Reproducible GPU baseline
+
+This fork includes a guarded RunPod benchmark for the river resolver. It rents
+one throwaway NVIDIA GPU, downloads only the required large assets, verifies
+their Git-LFS hashes, runs two deterministic 1,000-iteration resolves, copies
+the result home, and terminates the pod on every exit path.
+
+```shell
+make test
+make gpu-baseline-dry-run
+make gpu-baseline
+```
+
+The default is a community RTX 3090. A secure RTX 4090 can be selected when
+community hosts are unavailable or unhealthy:
+
+```shell
+DYYPHOLDEM_GPU_CLOUD_TYPE=SECURE \
+DYYPHOLDEM_GPU_TYPE='NVIDIA GeForce RTX 4090' \
+make gpu-baseline
+```
+
+The first measured optimization lazily loads street-specific bucket tables.
+On the verified RTX 4090 river run, import/startup fell from 14.94 seconds to
+1.03 seconds while root CFVs and strategy remained bit-identical to the
+baseline. Full methodology and caveats are in
+[`docs/gpu-baseline-2026-08-23.md`](docs/gpu-baseline-2026-08-23.md).
+
+
 
 ## Using / converting DeepHoldem models
 
@@ -77,4 +106,3 @@ DyppHoldem also includes a player that can play against [Slumbot](https://www.sl
 2. `python player/dyypholdem_slumbot_player.py <hands>`
 
 Specify the number of `<hands>` you like DyypHoldem to play and enjoy the show :-).
-

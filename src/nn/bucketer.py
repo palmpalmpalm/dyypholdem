@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import math
 import pickle
+import time
 
 import torch
 
@@ -12,61 +15,76 @@ import nn.bucketing.flop_tools as flop_tools
 import game.card_tools as card_tools
 
 
-_initialized = False
-_preflop_buckets: torch.Tensor
-_flop_cats: dict
-_turn_cats: dict
-_ihr_pair_to_bucket: dict
-_river_ihr: dict
-_river_buckets = 1000
+_preflop_buckets: torch.Tensor | None = None
+_flop_cats: dict | None = None
+_turn_cats: dict | None = None
+_ihr_pair_to_bucket: dict | None = None
+_river_ihr: dict | None = None
+_river_buckets: int | None = None
 
 
-def initialize():
-    global _initialized
-    global _preflop_buckets
-    global _flop_cats
-    global _turn_cats
+def _load_pickle(path: str):
+    with open(path, "rb") as stream:
+        return pickle.load(stream)
+
+
+def _load_timed(path: str, label: str):
+    started = time.perf_counter()
+    value = _load_pickle(path)
+    arguments.logger.loading(
+        f"{label} initialized in: {time.perf_counter() - started:.6f}s"
+    )
+    return value
+
+
+def _initialize_river_bucket_index():
     global _ihr_pair_to_bucket
-    global _river_ihr
     global _river_buckets
 
-    if not _initialized:
-
-        arguments.timer.start("Initializing buckets", log_level="TRACE")
-
-        _preflop_buckets = None
-
-        arguments.timer.split_start(message="Initializing river buckets", log_level="TRACE")
-        _ihr_pair_to_bucket = {}
-        _ihr_pair_to_bucket = pickle.load(open("./nn/bucketing/ihr_pair_to_bucket.pkl", "rb"))
+    if _ihr_pair_to_bucket is None:
+        _ihr_pair_to_bucket = _load_timed(
+            "./nn/bucketing/ihr_pair_to_bucket.pkl", "River bucket index"
+        )
         _river_buckets = len(_ihr_pair_to_bucket)
-        arguments.timer.split_stop(message="River buckets initialized in", log_level="LOADING")
-
-        arguments.timer.split_start(message="Initializing flop categories", log_level="TRACE")
-        _flop_cats = pickle.load(open("./nn/bucketing/flop_dist_cats.pkl", "rb"))
-        arguments.timer.split_stop(message="Flop categories initialized in", log_level="LOADING")
-
-        if not arguments.use_sqlite:
-            arguments.timer.split_start(message="Initializing turn categories", log_level="TRACE")
-            _turn_cats = pickle.load(open("./nn/bucketing/turn_dist_cats.pkl", "rb"))
-            arguments.timer.split_stop(message="Turn categories initialized in", log_level="LOADING")
-
-            arguments.timer.split_start(message="Initializing river categories", log_level="TRACE")
-            _river_ihr = pickle.load(open("./nn/bucketing/river_ihr.pkl", "rb"))
-            arguments.timer.split_stop(message="River categories initialized in", log_level="LOADING")
-
-        arguments.timer.stop(message="Bucket initialization done in", log_level="TIMING")
-
-    _initialized = True
 
 
-initialize()
+def initialize(street=None):
+    """Load only the lookup tables required for ``street``.
+
+    Passing ``None`` preserves the old eager-loading behavior for callers that
+    explicitly request it. Importing this module no longer reads every street's
+    lookup table.
+    """
+    global _flop_cats
+    global _turn_cats
+    global _river_ihr
+
+    if street not in (None, 1, 2, 3, 4):
+        raise ValueError(f"unsupported street: {street}")
+
+    if street in (None, 2) and _flop_cats is None:
+        _flop_cats = _load_timed(
+            "./nn/bucketing/flop_dist_cats.pkl", "Flop categories"
+        )
+
+    if street in (None, 3) and not arguments.use_sqlite and _turn_cats is None:
+        _turn_cats = _load_timed(
+            "./nn/bucketing/turn_dist_cats.pkl", "Turn categories"
+        )
+
+    if street in (None, 4):
+        _initialize_river_bucket_index()
+        if not arguments.use_sqlite and _river_ihr is None:
+            _river_ihr = _load_timed(
+                "./nn/bucketing/river_ihr.pkl", "River categories"
+            )
 
 
 # --- Gives the total number of buckets across all boards.
 # -- @return the number of buckets
 def get_bucket_count(street):
     if street == 4:
+        _initialize_river_bucket_index()
         return _river_buckets
     elif street == 3 or street == 2:
         return 1000
@@ -86,6 +104,7 @@ def get_rank_count():
 # -- @return a vector which maps each private hand to a bucket index
 def compute_buckets(board):
     street = card_tools.board_to_street(board)
+    initialize(street)
     if street == 1:
         return _compute_preflop_buckets()
     elif street == 2:

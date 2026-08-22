@@ -94,7 +94,12 @@ if use_pseudo_random:
 # global logger
 use_loguru = True
 if use_loguru:
-    import loguru
+    try:
+        import loguru
+    except ImportError:
+        use_loguru = False
+
+if use_loguru:
     logger = loguru.logger
     logger.remove(0)
     logger.level("LOADING", no=8, color="<fg #944100><bold>", icon="@")
