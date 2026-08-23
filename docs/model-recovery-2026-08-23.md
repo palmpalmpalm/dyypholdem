@@ -55,8 +55,35 @@ Every conversion gate checks:
 Native operators are not bit-identical to the old Torch7-style graph because
 their matrix/batch-normalization kernels accumulate in a slightly different
 order. The measured maximum error is around one part in a million and is the
-explicit compatibility tolerance; strategic parity still needs the planned
-GPU street-resolve benchmarks.
+explicit compatibility tolerance.
+
+## CUDA validation
+
+The guarded model-only validation passed on source commit
+`5bd2009fb71b00bdc13067bbec8a8d7f35fbee01` using a secure RTX 4090, Python
+3.11.11, and PyTorch `2.8.0.dev20250319+cu128`:
+
+- all four compact checkpoints loaded through `ValueNn.load_for_street()`;
+- maximum CPU-versus-CUDA output difference: `7.7486038e-7`;
+- maximum range-weighted zero-sum residual: `2.9802322e-8`;
+- median batch-of-two inference latency: `0.343-0.358 ms` after warmup;
+- peak CUDA allocation per loaded network: `12,973,568-19,666,944` bytes;
+- total uploaded checkpoint payload: `29,570,388` bytes.
+
+The successful ignored artifact is:
+
+`runs/gpu-model-validation/dyypholdem-models-20260823T090842Z/summary.json`
+
+The first guarded attempt exposed a repository-relative path bug and wrote no
+summary. It was terminated automatically; the fix gained a regression test
+before the successful rerun. The successful runner terminated its throwaway pod
+and both its own exact-name check and an independent account audit found zero
+remaining DyypHoldem pods. Provider billing remains authoritative; the two
+short attempts imply roughly five cents at the observed `$0.74/hour` rate.
+
+This proves checkpoint recovery, native conversion, runtime mapping, and CUDA
+inference parity. It does not yet prove full flop/turn/preflop resolving parity
+or playing strength; those require the next street-resolve benchmark suite.
 
 ## Commands
 

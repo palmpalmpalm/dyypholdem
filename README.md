@@ -89,7 +89,8 @@ Downloads and generated checkpoints stay under ignored
 conversion checks every source and parameter hash, compares deterministic
 legacy/native outputs, reloads every checkpoint, and verifies the range-weighted
 zero-sum constraint. The largest measured legacy/native output difference was
-`1.55e-6`.
+`1.55e-6`. A guarded RTX 4090 validation subsequently loaded all four compact
+networks and measured a maximum CPU/CUDA difference of `7.75e-7`.
 
 Use the compact set without modifying tracked model pointers:
 
