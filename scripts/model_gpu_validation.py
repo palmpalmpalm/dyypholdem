@@ -59,6 +59,12 @@ def deterministic_inputs(input_size: int, output_size: int) -> torch.Tensor:
     return inputs
 
 
+def resolve_model_root(path: Path) -> Path:
+    if not path.is_absolute():
+        path = PROJECT_DIR / path
+    return path.resolve()
+
+
 def validate_model(
     model_root: Path,
     folder: str,
@@ -149,7 +155,7 @@ def main() -> None:
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required for model validation")
 
-    model_root = args.model_root.resolve()
+    model_root = resolve_model_root(args.model_root)
     os.environ["DYYPHOLDEM_COMPACT_MODEL_PATH"] = str(model_root)
     rows = [
         validate_model(model_root, folder, street, auxiliary, args.repeats)
