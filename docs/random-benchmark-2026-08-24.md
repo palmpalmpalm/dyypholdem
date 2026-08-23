@@ -72,3 +72,41 @@ reused on eligible first actions.
 
 This match measures runtime and end-to-end correctness. One hundred hands
 against a random policy is far too small and is not an exploitability estimate.
+
+## Verified RTX 4090 result
+
+The completed run `dyypholdem-ui-20260823T205907Z` used source commit
+`5bbc2dbd18ec554d124d3cd86453f34c15279ee3`, dealer/opponent/bot seed
+`20260824`, and the recovered compact value networks. Exact completion
+validation passed with 100 bot results, 100 opponent results, hand IDs 0–99,
+230 timed bot decisions, and 208 opponent actions. Bot and opponent winnings
+were exactly zero-sum at +20,350 and -20,350 chips. All stale-state conflict,
+rate-limit backoff, request-retry, and error counters were zero.
+
+The full match took 1,085.603 seconds (18m05.603s), excluding pod setup and
+shutdown. Timings below are CUDA-synchronized total bot decision latency:
+
+| Street | Decisions | Mean | p50 | p95 | Max | Resolve mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Preflop | 100 | 1.940s | 0.461s | 4.586s | 4.619s | 1.904s |
+| Flop | 61 | 9.505s | 10.565s | 11.476s | 15.853s | 5.363s |
+| Turn | 39 | 5.037s | 4.934s | 6.089s | 11.054s | 4.898s |
+| River | 30 | 2.766s | 2.876s | 3.878s | 3.920s | 2.699s |
+
+Preflop is intentionally bimodal: 50 cached-root decisions averaged 0.0189s,
+while 50 fresh resolves averaged 3.860s. The one-time root precompute took
+11.221s, including 6.102s to build the lookahead and 4.921s for CFR.
+
+Two deterministic edge cases were found and fixed before accepting the final
+result. A preflop limp followed by an opponent all-in previously mislabeled a
+call as a nonterminal check and crashed the lookahead; a called all-in before
+the river previously skipped the bot's showdown result after the dealer ran
+out the board. Regression coverage now includes both states plus ordinary
+street transitions, uncalled shoves, and normal river completion. The final
+backend suite passed 61 tests with five optional-dependency skips.
+
+The successful pod's conservative acquisition-to-verified-deletion lifetime
+was 1,410.579 seconds and cost about $0.290 at $0.74/hour. Including the two
+diagnostic runs that exposed the edge cases, total authorized RTX 4090 time was
+2,972.258 seconds (49m32.258s), about $0.611. Final copyback succeeded and the
+provider API verified that the benchmark pod was deleted.
