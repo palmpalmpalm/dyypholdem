@@ -1,0 +1,201 @@
+"""Structured, privacy-aware telemetry for live DyypHoldem decisions."""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import datetime, timezone
+import hashlib
+import json
+import math
+from pathlib import Path
+import statistics
+from typing import Iterable
+
+
+STREETS = ("preflop", "flop", "turn", "river")
+PHASE_FIELDS = (
+    "invariant_seconds",
+    "chance_reconstruction_seconds",
+    "terminal_equity_seconds",
+    "public_tree_seconds",
+    "lookahead_tensor_seconds",
+    "lookahead_build_seconds",
+    "cfr_seconds",
+    "results_seconds",
+    "resolve_total_seconds",
+    "sampling_seconds",
+    "total_response_seconds",
+)
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def model_manifest(model_root: Path | None) -> list[dict[str, object]]:
+    if model_root is None:
+        return []
+    out = []
+    for street in ("preflop-aux", "flop", "turn", "river"):
+        path = model_root / street / "final_compact.pt"
+        if path.is_file():
+            out.append(
+                {
+                    "street": street,
+                    "file": str(path),
+                    "bytes": path.stat().st_size,
+                    "sha256": file_sha256(path),
+                }
+            )
+    return out
+
+
+def percentile(values: list[float], fraction: float) -> float:
+    """Linear percentile matching common monitoring dashboards."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * fraction
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def summarize_values(values: Iterable[float]) -> dict[str, float | int]:
+    samples = [float(value) for value in values]
+    if not samples:
+        return {"count": 0, "total": 0.0, "mean": 0.0, "p50": 0.0, "p95": 0.0, "max": 0.0}
+    return {
+        "count": len(samples),
+        "total": sum(samples),
+        "mean": statistics.fmean(samples),
+        "p50": percentile(samples, 0.50),
+        "p95": percentile(samples, 0.95),
+        "max": max(samples),
+    }
+
+
+def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object]) -> dict[str, object]:
+    event_list = list(events)
+    decisions = [event for event in event_list if event.get("event") == "decision"]
+    initializations = [event for event in event_list if event.get("event") == "initialization"]
+    initialization = initializations[-1] if initializations else None
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for decision in decisions:
+        grouped[str(decision.get("street", "unknown"))].append(decision)
+
+    by_street: dict[str, object] = {}
+    for street in STREETS:
+        street_events = grouped.get(street, [])
+        phase_summary = {
+            field.removesuffix("_seconds"): summarize_values(
+                float(item.get(field, 0.0)) for item in street_events
+            )
+            for field in PHASE_FIELDS
+        }
+        by_street[street] = {
+            "decisions": len(street_events),
+            "timing_seconds": phase_summary,
+            "latest_action": street_events[-1].get("chosen_action") if street_events else None,
+        }
+
+    recent = []
+    for item in decisions[-12:]:
+        recent.append(
+            {
+                "timestamp": item.get("timestamp"),
+                "hand_number": item.get("hand_number"),
+                "decision_number": item.get("decision_number"),
+                "street": item.get("street"),
+                "board": item.get("board"),
+                "pot": item.get("pot"),
+                "chosen_action": item.get("chosen_action"),
+                "cfr_iterations": item.get("cfr_iterations"),
+                "total_response_seconds": item.get("total_response_seconds"),
+                "cfr_seconds": item.get("cfr_seconds"),
+                "peak_cuda_allocated_bytes": item.get("peak_cuda_allocated_bytes"),
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "updated_at": utc_now(),
+        "metadata": metadata,
+        "initialization": initialization,
+        "decision_count": len(decisions),
+        "by_street": by_street,
+        "recent_decisions": recent,
+    }
+
+
+def render_text_report(report: dict[str, object]) -> str:
+    metadata = report.get("metadata", {})
+    lines = [
+        "DyypHoldem live calculation report",
+        f"Updated: {report.get('updated_at')}",
+        f"Decisions: {report.get('decision_count', 0)}",
+        f"GPU: {metadata.get('gpu_name', 'unknown')}",
+        f"CFR: {metadata.get('cfr_iterations', 'unknown')} iterations "
+        f"({metadata.get('cfr_skip_iterations', 'unknown')} skipped)",
+        f"Root precompute: {float((report.get('initialization') or {}).get('seconds', 0.0)):.6f} seconds",
+        "",
+        "Street timing (seconds)",
+    ]
+    for street in STREETS:
+        data = report["by_street"][street]
+        total = data["timing_seconds"]["total_response"]
+        cfr = data["timing_seconds"]["cfr"]
+        lines.append(
+            f"- {street}: n={data['decisions']}, response mean={total['mean']:.6f}, "
+            f"p50={total['p50']:.6f}, p95={total['p95']:.6f}, max={total['max']:.6f}, "
+            f"CFR mean={cfr['mean']:.6f}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+class DecisionTelemetryWriter:
+    """Append full private records and atomically refresh safe reports."""
+
+    def __init__(self, jsonl_path: Path, report_path: Path, text_report_path: Path, metadata: dict[str, object]):
+        self.jsonl_path = Path(jsonl_path)
+        self.report_path = Path(report_path)
+        self.text_report_path = Path(text_report_path)
+        self.metadata = dict(metadata)
+        self.events: list[dict[str, object]] = []
+        self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        self.report_path.parent.mkdir(parents=True, exist_ok=True)
+        self.text_report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def append(self, event: dict[str, object]) -> None:
+        record = dict(event)
+        record.setdefault("timestamp", utc_now())
+        with self.jsonl_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+            stream.flush()
+        self.events.append(record)
+        self.refresh_report()
+
+    def refresh_report(self) -> dict[str, object]:
+        report = build_report(self.events, self.metadata)
+        self._atomic_text(self.report_path, json.dumps(report, indent=2, sort_keys=True) + "\n")
+        self._atomic_text(self.text_report_path, render_text_report(report))
+        return report
+
+    @staticmethod
+    def _atomic_text(path: Path, content: str) -> None:
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_text(content, encoding="utf-8")
+        temporary.replace(path)

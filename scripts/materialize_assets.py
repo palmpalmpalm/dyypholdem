@@ -62,9 +62,21 @@ EAGER_BUCKET_ASSETS = (
         },
 )
 
+PREFLOP_PLAY_ASSETS = (
+        {
+            "drive_id": "1VQnqGBDwY39oDdgJjsrAk0RuVNfShs6y",
+            "path": "src/nn/bucketing/preflop_buckets.pt",
+            "sha256": "131814be7cec451cd4cdc894007db16b5c0eb83a9afc6ff7132e361ee2f4a1bc",
+            "size": 117_219_115,
+        },
+)
+
 ASSETS = {
     "river": RIVER_ASSETS,
     "legacy-eager-river": RIVER_ASSETS + EAGER_BUCKET_ASSETS,
+    # Full continual play also loads a precomputed hand-to-flop-bucket matrix
+    # from NextRoundValuePre; the 169 current-street buckets are computed.
+    "play": RIVER_ASSETS + PREFLOP_PLAY_ASSETS + EAGER_BUCKET_ASSETS,
 }
 
 

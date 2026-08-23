@@ -9,6 +9,7 @@ import server.protocol_to_node as protocol_to_node
 from tree.tree_node import TreeNode
 from game.evaluation.evaluator import Evaluator
 import game.card_to_string_conversion as card_conversion
+from server.winnings import showdown_winnings
 
 
 class ACPCGame(object):
@@ -82,15 +83,24 @@ class ACPCGame(object):
                 opp_bet = parsed_state.bet1 if parsed_state.position == 0 else parsed_state.bet2
                 if parsed_state.all_actions[-1].action is constants.ACPCActions.fold:
                     have_won = my_bet >= opp_bet
+                    winnings = opp_bet if have_won else -my_bet
                 else:
                     my_final_hand = parsed_state.my_hand_string + parsed_state.board
                     opp_final_hand = parsed_state.opponent_hand_string + parsed_state.board
                     my_strength = Evaluator.evaluate_seven_card_hand(card_conversion.string_to_board(my_final_hand))
                     opp_strength = Evaluator.evaluate_seven_card_hand(card_conversion.string_to_board(opp_final_hand))
-                    have_won = my_strength.item() <= opp_strength.item()
+                    winnings = showdown_winnings(
+                        my_strength.item(), opp_strength.item(), my_bet, opp_bet
+                    )
+                    have_won = winnings > 0
 
-                winner = parsed_state.player if have_won else (constants.Players(1 - parsed_state.player.value))
-                winnings = opp_bet if have_won else -my_bet
+                winner = (
+                    parsed_state.player
+                    if have_won
+                    else constants.Players(1 - parsed_state.player.value)
+                    if winnings < 0
+                    else constants.Players.Chance
+                )
                 arguments.logger.trace(f"Hand ended with winner {winner}")
                 arguments.logger.trace(f"Final bets: {parsed_state.player}={my_bet}, {constants.Players(1 - parsed_state.player.value)}={opp_bet}")
 

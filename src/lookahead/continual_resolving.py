@@ -1,4 +1,8 @@
 
+from datetime import datetime, timezone
+import os
+import time
+
 import torch
 
 import settings.arguments as arguments
@@ -23,13 +27,77 @@ class ContinualResolving(object):
     player: constants.Players
     hand_id: int
 
+    STREET_NAMES = {1: "preflop", 2: "flop", 3: "turn", 4: "river"}
+    VALUE_NETWORKS = {
+        1: ["flop", "preflop-aux"],
+        2: ["turn"],
+        3: ["river"],
+        4: [],
+    }
+
     def __init__(self):
+        initialization_started = self._started()
+        if arguments.use_gpu and torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         self.starting_player_range = card_tools.get_uniform_range(arguments.Tensor())
         self.terminal_equity = TerminalEquity()
         self.first_node_resolving: Resolving = None
         self.starting_cfvs_p1: arguments.Tensor = None
 
         self.resolve_first_node()
+        self.initialization_seconds = self._elapsed(initialization_started)
+        self.initialization_telemetry = {
+            "event": "initialization",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "seconds": self.initialization_seconds,
+            "root_resolve": dict(getattr(self.first_node_resolving, "last_timing", {})),
+            "cfr_iterations": arguments.cfr_iters,
+            "cfr_skip_iterations": arguments.cfr_skip_iters,
+            "device": str(arguments.device),
+            "gpu_name": self._gpu_name(),
+            "peak_cuda_allocated_bytes": self._peak_cuda_allocated(),
+            "compact_model_root": os.environ.get("DYYPHOLDEM_COMPACT_MODEL_PATH"),
+        }
+        self.last_decision_telemetry = None
+
+    @staticmethod
+    def _synchronize():
+        if arguments.use_gpu and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    @classmethod
+    def _started(cls):
+        cls._synchronize()
+        return time.perf_counter()
+
+    @classmethod
+    def _elapsed(cls, started):
+        cls._synchronize()
+        return time.perf_counter() - started
+
+    @staticmethod
+    def _gpu_name():
+        if arguments.use_gpu and torch.cuda.is_available():
+            return torch.cuda.get_device_name(0)
+        return None
+
+    @staticmethod
+    def _peak_cuda_allocated():
+        if arguments.use_gpu and torch.cuda.is_available():
+            return int(torch.cuda.max_memory_allocated())
+        return 0
+
+    @staticmethod
+    def _cuda_allocated():
+        if arguments.use_gpu and torch.cuda.is_available():
+            return int(torch.cuda.memory_allocated())
+        return 0
+
+    @staticmethod
+    def _cuda_reserved():
+        if arguments.use_gpu and torch.cuda.is_available():
+            return int(torch.cuda.memory_reserved())
+        return 0
 
     # --- Solves a depth-limited lookahead from the first node of the game to get
     # -- opponent counterfactual values.
@@ -77,14 +145,62 @@ class ContinualResolving(object):
     # -- * `action`: an element of @{constants.acpc_actions}
     # -- * `raise_amount`: the number of chips to raise (if `action` is raise)
     def compute_action(self, state: ProcessedState, node: TreeNode):
-        self._resolve_node(state, node)
-        sampled_bet = self._sample_bet(state, node)
+        total_started = self._started()
+        if arguments.use_gpu and torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+        phase_timing = self._resolve_node(state, node)
+        sampling_started = self._started()
+        sampled_bet, strategy_telemetry = self._sample_bet(state, node)
+        sampling_seconds = self._elapsed(sampling_started)
 
         self.decision_id = self.decision_id + 1
         self.last_bet = sampled_bet
         self.last_node = node
 
         out = self._bet_to_action(node, sampled_bet)
+
+        total_response_seconds = self._elapsed(total_started)
+        street = self.STREET_NAMES.get(node.street, "unknown")
+        chosen_action = strategy_telemetry["chosen_action"]
+        self.last_decision_telemetry = {
+            "event": "decision",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "hand_number": state.hand_number,
+            "decision_number": self.decision_id,
+            "street": street,
+            "street_number": node.street,
+            "board": state.board,
+            "pot": int(state.bet1 + state.bet2),
+            "bets": [int(state.bet1), int(state.bet2)],
+            "public_actions": list(state.actions_raw),
+            "cfr_iterations": arguments.cfr_iters,
+            "cfr_skip_iterations": arguments.cfr_skip_iters,
+            "value_networks": list(self.VALUE_NETWORKS.get(node.street, [])),
+            "reused_root_precompute": bool(phase_timing.get("reused_root_precompute", False)),
+            "root_precompute_seconds": self.initialization_seconds,
+            "invariant_seconds": phase_timing.get("invariant_seconds", 0.0),
+            "chance_reconstruction_seconds": phase_timing.get("chance_reconstruction_seconds", 0.0),
+            "chance_replayed_flop": phase_timing.get("chance_replayed_flop", False),
+            "terminal_equity_seconds": phase_timing.get("terminal_equity_seconds", 0.0),
+            "public_tree_seconds": phase_timing.get("public_tree_seconds", 0.0),
+            "lookahead_tensor_seconds": phase_timing.get("lookahead_tensor_seconds", 0.0),
+            "lookahead_build_seconds": phase_timing.get("lookahead_build_seconds", 0.0),
+            "cfr_seconds": phase_timing.get("cfr_seconds", 0.0),
+            "results_seconds": phase_timing.get("results_seconds", 0.0),
+            "resolve_total_seconds": phase_timing.get("resolve_total_seconds", 0.0),
+            "sampling_seconds": sampling_seconds,
+            "total_response_seconds": total_response_seconds,
+            "strategy": strategy_telemetry["strategy"],
+            "sample_cutoff": strategy_telemetry["sample_cutoff"],
+            "chosen_action": chosen_action,
+            "chosen_bet": int(sampled_bet),
+            "device": str(arguments.device),
+            "gpu_name": self._gpu_name(),
+            "cuda_allocated_bytes": self._cuda_allocated(),
+            "cuda_reserved_bytes": self._cuda_reserved(),
+            "peak_cuda_allocated_bytes": self._peak_cuda_allocated(),
+        }
 
         return out
 
@@ -101,6 +217,19 @@ class ContinualResolving(object):
             # the strategy computation for the first decision node has been already set up
             self.current_player_range = self.starting_player_range.clone()
             self.resolving = self.first_node_resolving
+            return {
+                "reused_root_precompute": True,
+                "invariant_seconds": 0.0,
+                "chance_reconstruction_seconds": 0.0,
+                "chance_replayed_flop": False,
+                "terminal_equity_seconds": 0.0,
+                "public_tree_seconds": 0.0,
+                "lookahead_tensor_seconds": 0.0,
+                "lookahead_build_seconds": 0.0,
+                "cfr_seconds": 0.0,
+                "results_seconds": 0.0,
+                "resolve_total_seconds": 0.0,
+            }
 
         # 2.0 other nodes - we need to update the invariant
         else:
@@ -110,18 +239,33 @@ class ContinualResolving(object):
             arguments.logger.debug(f"Resolving current node with {arguments.cfr_iters} iterations")
 
             # 2.1 update the invariant based on actions we did not make
-            self._update_invariant(state, node)
+            invariant_started = self._started()
+            chance_timing = self._update_invariant(state, node)
+            invariant_seconds = self._elapsed(invariant_started)
 
             arguments.timer.start()
             arguments.timer.split_start("Calculating terminal equity...", log_level="TRACE")
             # 2.2 re-solve
+            terminal_started = self._started()
             self.terminal_equity.set_board(node.board)
+            terminal_equity_seconds = self._elapsed(terminal_started)
             arguments.timer.split_stop("Terminal equities time", log_level="TIMING")
 
             self.resolving = Resolving(self.terminal_equity)
             self.resolving.resolve(node, self.current_player_range, self.current_opponent_cfvs_bound)
 
             arguments.timer.stop("Node resolved and equities for actions calculated", log_level="DEBUG")
+            timing = dict(self.resolving.last_timing)
+            timing.update(
+                {
+                    "reused_root_precompute": False,
+                    "invariant_seconds": invariant_seconds,
+                    "chance_reconstruction_seconds": chance_timing["seconds"],
+                    "chance_replayed_flop": chance_timing["replayed_flop"],
+                    "terminal_equity_seconds": terminal_equity_seconds,
+                }
+            )
+            return timing
 
     # --- Updates the player's range and the opponent's counterfactual values to be
     # -- consistent with game actions since the last re-solved state.
@@ -133,6 +277,7 @@ class ContinualResolving(object):
     # -- (a table of the type returned by @{protocol_to_node.parse_state})
     # -- @local
     def _update_invariant(self, state, node):
+        chance_timing = {"seconds": 0.0, "replayed_flop": False}
         # 1.0 street has changed
         if self.last_node and self.last_node.street != node.street:
             assert self.last_node.street + 1 == node.street
@@ -140,6 +285,7 @@ class ContinualResolving(object):
             # 1.1 opponent cfvs
             # if the street has changed, the reconstruction API simply gives us CFVs
             self.current_opponent_cfvs_bound = self.resolving.get_chance_action_cfv(self.last_bet, node.board)
+            chance_timing = dict(self.resolving.last_chance_timing)
             # 1.2 player range
             # if street has change, we have to mask out the colliding hands
             self.current_player_range = card_tools.normalize_range(node.board, self.current_player_range)
@@ -155,6 +301,8 @@ class ContinualResolving(object):
         # 3.0 handle game within the street
         else:
             assert self.last_node.street == node.street
+
+        return chance_timing
 
     # --- Samples an action to take from the strategy at the given game state.
     # -- @param node the game node where the re-solving player is to act (a table of
@@ -224,7 +372,30 @@ class ContinualResolving(object):
         self.current_player_range.mul_(strategy)
         self.current_player_range = card_tools.normalize_range(node.board, self.current_player_range)
 
-        return sampled_bet
+        strategy_telemetry = {
+            "strategy": [
+                {
+                    "bet": int(possible_bets[i].item()),
+                    "action": self._action_label(int(possible_bets[i].item()), state),
+                    "probability": float(hand_strategy[i].item()),
+                }
+                for i in range(actions_count)
+            ],
+            "sample_cutoff": float(r),
+            "chosen_action": sampled_bet_action.lower().replace("-", "_"),
+        }
+
+        return sampled_bet, strategy_telemetry
+
+    @staticmethod
+    def _action_label(bet, state):
+        if bet == constants.Actions.fold.value:
+            return "check" if state.bet1 == state.bet2 else "fold"
+        if bet == constants.Actions.ccall.value:
+            return "check" if state.bet1 == state.bet2 else "call"
+        if bet == game_settings.stack:
+            return "all_in"
+        return f"raise_to_{bet}"
 
     # --- Converts an internal action representation into a cleaner format.
     # -- @param node the game node where the re-solving player is to act (a table of
@@ -245,4 +416,3 @@ class ContinualResolving(object):
         else:
             assert sampled_bet >= 0
             return Action(action=constants.ACPCActions.rraise, raise_amount=sampled_bet)
-

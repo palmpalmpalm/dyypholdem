@@ -1,3 +1,7 @@
+import time
+
+import torch
+
 import settings.arguments as arguments
 
 from terminal_equity.terminal_equity import TerminalEquity
@@ -18,6 +22,21 @@ class Resolving(object):
     lookahead_tree: TreeNode
     lookahead: Lookahead
     resolve_results: ResolveResults
+
+    @staticmethod
+    def _synchronize():
+        if arguments.use_gpu and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    @classmethod
+    def _started(cls):
+        cls._synchronize()
+        return time.perf_counter()
+
+    @classmethod
+    def _elapsed(cls, started):
+        cls._synchronize()
+        return time.perf_counter() - started
 
     def __init__(self, terminal_equity):
         self.tree_builder = PokerTreeBuilder()
@@ -48,23 +67,42 @@ class Resolving(object):
         self.opponent_range = opponent_range
         self.opponent_cfvs = None
 
+        total_started = self._started()
+        started = self._started()
         self._create_lookahead_tree(node)
+        public_tree_seconds = self._elapsed(started)
 
         if player_range.dim() == 1:
             player_range = player_range.view(1, player_range.size(0))
             opponent_range = opponent_range.view(1, opponent_range.size(0))
 
+        started = self._started()
         self.lookahead = Lookahead(self.terminal_equity, player_range.size(0))
+        lookahead_tensor_seconds = self._elapsed(started)
 
         arguments.timer.split_start("Building lookahead tree", log_level="TRACE")
+        started = self._started()
         self.lookahead.build_lookahead(self.lookahead_tree)
+        lookahead_build_seconds = self._elapsed(started)
         arguments.timer.split_stop("Lookahead tree build time", log_level="TIMING")
 
         arguments.timer.split_start(f"Resolving {street_name} tree", log_level="TRACE")
+        started = self._started()
         self.lookahead.resolve_first_node(player_range, opponent_range)
+        cfr_seconds = self._elapsed(started)
         arguments.timer.split_stop(f"{street_name} tree resolution time", log_level="TIMING")
 
+        started = self._started()
         self.resolve_results = self.lookahead.get_results()
+        results_seconds = self._elapsed(started)
+        self.last_timing = {
+            "public_tree_seconds": public_tree_seconds,
+            "lookahead_tensor_seconds": lookahead_tensor_seconds,
+            "lookahead_build_seconds": lookahead_build_seconds,
+            "cfr_seconds": cfr_seconds,
+            "results_seconds": results_seconds,
+            "resolve_total_seconds": self._elapsed(total_started),
+        }
 
         return self.resolve_results
 
@@ -84,21 +122,40 @@ class Resolving(object):
 
         self.player_range = player_range
         self.opponent_cfvs = opponent_cfvs
+        total_started = self._started()
+        started = self._started()
         self._create_lookahead_tree(node)
+        public_tree_seconds = self._elapsed(started)
 
         if player_range.dim() == 1:
             player_range = player_range.view(1, player_range.size(0))
 
         arguments.timer.split_start("Building lookahead tree", log_level="TRACE")
+        started = self._started()
         self.lookahead = Lookahead(self.terminal_equity, player_range.size(0))
+        lookahead_tensor_seconds = self._elapsed(started)
+        started = self._started()
         self.lookahead.build_lookahead(self.lookahead_tree)
+        lookahead_build_seconds = self._elapsed(started)
         arguments.timer.split_stop("Tree build time", log_level="TIMING")
 
         arguments.timer.split_start(f"Resolving {street_name} node", log_level="TRACE")
+        started = self._started()
         self.lookahead.resolve(player_range, opponent_cfvs)
+        cfr_seconds = self._elapsed(started)
         arguments.timer.split_stop(f"{street_name} resolve time", log_level="TIMING")
 
+        started = self._started()
         self.resolve_results = self.lookahead.get_results()
+        results_seconds = self._elapsed(started)
+        self.last_timing = {
+            "public_tree_seconds": public_tree_seconds,
+            "lookahead_tensor_seconds": lookahead_tensor_seconds,
+            "lookahead_build_seconds": lookahead_build_seconds,
+            "cfr_seconds": cfr_seconds,
+            "results_seconds": results_seconds,
+            "resolve_total_seconds": self._elapsed(total_started),
+        }
         return self.resolve_results
 
     # --- Gives a list of possible actions at the node being re-solved.
@@ -153,8 +210,11 @@ class Resolving(object):
     # -- @param board a vector of board cards which were updated by the chance event
     # -- @return a vector of cfvs
     def get_chance_action_cfv(self, action, board):
+        started = self._started()
+        replayed_flop = False
         # resolve to get next_board chance actions if flop
         if board.dim() == 1 and board.size(0) == 3:
+            replayed_flop = True
             self.lookahead.reset()
             board_idx = card_tools.get_flop_board_index(board)
             self.lookahead.next_board_idx = board_idx
@@ -164,7 +224,12 @@ class Resolving(object):
             else:
                 self.lookahead.resolve_first_node(self.player_range, self.opponent_range)
             self.lookahead.next_board_idx = None
-        return self.lookahead.get_chance_action_cfv(action, board)
+        out = self.lookahead.get_chance_action_cfv(action, board)
+        self.last_chance_timing = {
+            "seconds": self._elapsed(started),
+            "replayed_flop": replayed_flop,
+        }
+        return out
 
     # --- Gives the probability that the re-solved strategy takes a given action.
     # --

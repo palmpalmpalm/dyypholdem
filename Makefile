@@ -1,4 +1,4 @@
-.PHONY: test model-recovery-progress recover-models compact-model-progress compact-models gpu-model-validation-dry-run gpu-model-validation gpu-baseline-dry-run gpu-baseline
+.PHONY: test model-recovery-progress recover-models compact-model-progress compact-models gpu-model-validation-dry-run gpu-model-validation gpu-baseline-dry-run gpu-baseline play-ui-dry-run play-ui play-ui-status play-ui-logs play-ui-stop
 
 PYTHON ?= /Users/palm/opt/miniconda3/bin/python3
 
@@ -28,3 +28,18 @@ gpu-baseline-dry-run:
 
 gpu-baseline:
 	./scripts/run_gpu_baseline.sh
+
+play-ui-dry-run:
+	./scripts/run_play_ui.sh dry-run
+
+play-ui:
+	./scripts/run_play_ui.sh start
+
+play-ui-status:
+	./scripts/run_play_ui.sh status
+
+play-ui-logs:
+	./scripts/run_play_ui.sh logs
+
+play-ui-stop:
+	./scripts/run_play_ui.sh stop
