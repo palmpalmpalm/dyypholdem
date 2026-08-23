@@ -471,9 +471,26 @@ start_detached_controller() {
 
   umask 077
   : > "$CONTROLLER_LOG"
-  nohup "$PROJECT_DIR/scripts/run_play_ui.sh" controller \
-    >"$CONTROLLER_LOG" 2>&1 < /dev/null &
-  controller_pid=$!
+  controller_pid="$("$LOCAL_PYTHON" - "$PROJECT_DIR/scripts/run_play_ui.sh" \
+    "$CONTROLLER_LOG" <<'PY'
+import os
+import subprocess
+import sys
+
+launcher, log_path = sys.argv[1:]
+with open(log_path, "ab", buffering=0) as log:
+    process = subprocess.Popen(
+        [launcher, "controller"],
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        close_fds=True,
+        env=os.environ.copy(),
+        start_new_session=True,
+    )
+print(process.pid)
+PY
+)"
   printf '%s\n' "$controller_pid" > "$CONTROLLER_PID_FILE"
   chmod 600 "$CONTROLLER_LOG" "$CONTROLLER_PID_FILE"
   printf 'PLAY_UI_CONTROLLER_PID=%s\nPLAY_UI_CONTROLLER_LOG=%s\n' \

@@ -76,6 +76,7 @@ sleep 30
                 os.kill(controller_pid, 0)
                 manifest = json.loads((session_root / "current.json").read_text())
                 self.assertEqual(controller_pid, manifest["launcher_pid"])
+                self.assertEqual(controller_pid, os.getsid(controller_pid))
                 self.assertIn(f"PLAY_UI_CONTROLLER_PID={controller_pid}", result.stdout)
                 self.assertIn("PLAY_UI_READY", result.stdout)
                 self.assertEqual(stat.S_IMODE(pid_file.stat().st_mode), 0o600)
