@@ -73,6 +73,7 @@ def build_create_payload(
         "gpuCount": 1,
         "containerDiskInGb": disk_gb,
         "ports": ["22/tcp", f"{http_port}/http"],
+        "supportPublicIp": True,
         "env": {"PUBLIC_KEY": public_key},
     }
 

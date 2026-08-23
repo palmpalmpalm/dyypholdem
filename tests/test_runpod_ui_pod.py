@@ -18,6 +18,7 @@ class RunPodUiPodTest(unittest.TestCase):
         self.assertEqual(payload["gpuTypeIds"], ["NVIDIA GeForce RTX 4090"])
         self.assertEqual(payload["cloudType"], "SECURE")
         self.assertEqual(payload["ports"], ["22/tcp", "8000/http"])
+        self.assertTrue(payload["supportPublicIp"])
         self.assertEqual(payload["gpuCount"], 1)
 
     def test_safe_status_redacts_network_endpoint(self):

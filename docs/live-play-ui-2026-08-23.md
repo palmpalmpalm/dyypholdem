@@ -29,7 +29,8 @@ make play-ui
 The controller:
 
 1. checks all four compact checkpoint files locally;
-2. creates exactly one Secure RTX 4090 exposing only `22/tcp` and `8000/http`;
+2. creates exactly one Secure RTX 4090, explicitly requests a public IP, and
+   exposes only `22/tcp` and `8000/http`;
 3. fixes an absolute paid-resource deadline, then arms both an authenticated
    remote stop and an independent local API stop/delete watchdog;
 4. syncs code and compact checkpoints;
