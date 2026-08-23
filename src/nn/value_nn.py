@@ -1,8 +1,12 @@
 
+import os
+from pathlib import Path
+
 import torch
 
 import settings.arguments as arguments
 
+from nn.compact_value_net import is_compact_checkpoint, load_compact_checkpoint
 import nn.modules.module
 
 
@@ -29,9 +33,20 @@ class ValueNn(object):
     # -- @param output An NxO tensor in which to store N sets of neural net outputs.
     # -- See @{net_builder} for details of each output.
     def get_value(self, inputs, output):
-        output.copy_(self.model.forward(inputs))
+        with torch.inference_mode():
+            output.copy_(self.model.forward(inputs))
 
     def load_for_street(self, street, aux=False, training=False):
+        compact_root = os.environ.get("DYYPHOLDEM_COMPACT_MODEL_PATH")
+        if compact_root and not training:
+            if aux:
+                assert street == 1
+                folder = "preflop-aux"
+            else:
+                folder = arguments.street_folders[street + 1].strip("/")
+            net_file = Path(compact_root) / folder / "final_compact.pt"
+            return self.load_from_file(str(net_file))
+
         if training:
             net_file = arguments.training_model_path
         else:
@@ -51,37 +66,64 @@ class ValueNn(object):
 
         arguments.timer.split_start(f"Loading neural network '{file_name}'", log_level="DEBUG")
 
-        saved_dict = torch.load(file_name, weights_only=False)
-        self.__dict__.update(saved_dict)
+        saved_dict = self._load_checkpoint(file_name)
+        if is_compact_checkpoint(saved_dict):
+            self.model = load_compact_checkpoint(saved_dict)
+            self.model_state = {}
+            self.model_info = dict(saved_dict["model_info"])
+            self.model_info["device"] = torch.device(
+                str(self.model_info.get("device", "cpu"))
+            )
+            datatype = self.model_info.get("datatype", "float32")
+            if isinstance(datatype, str):
+                datatype = getattr(torch, datatype)
+            self.model_info["datatype"] = datatype
+        else:
+            self.__dict__.update(saved_dict)
 
         assert self.model, "no model found in file"
         assert self.model_info, "no model info found in file"
 
         arguments.logger.trace(repr(self))
         device = self.model_info['device']
-        if device:
-            if arguments.device != device:
-                if device == torch.device('cpu'):
-                    arguments.logger.info("Moving model trained on CPU to GPU")
-                    self.model.cuda()
-                elif device == torch.device('cuda'):
-                    arguments.logger.info("Moving model trained on GPU to CPU")
-                    self.model.cpu()
-                else:
-                    raise ValueError("unknown device")
-        else:
+        if device and arguments.device != device:
+            if arguments.device == torch.device('cuda'):
+                arguments.logger.info("Moving model from CPU to GPU")
+                self.model.cuda()
+            elif arguments.device == torch.device('cpu'):
+                arguments.logger.info("Moving model from GPU to CPU")
+                self.model.cpu()
+            else:
+                raise ValueError("unknown target device")
+        elif not device:
             arguments.logger.warning(f"Model does not contain device information - setting it to {repr(arguments.device)}")
             if arguments.device == torch.device('cpu'):
                 self.model.cpu()
             else:
                 self.model.cuda()
 
-        # setting model to evaluation mode
-        self.model.evaluate()
+        # The legacy module graph uses ``evaluate`` while native PyTorch uses
+        # ``eval``. Compact checkpoints deliberately use the native API.
+        if hasattr(self.model, "evaluate"):
+            self.model.evaluate()
+        else:
+            self.model.eval()
 
         arguments.timer.split_stop("Network loaded in", log_level="LOADING")
 
         return self
+
+    @staticmethod
+    def _load_checkpoint(file_name: str):
+        try:
+            return torch.load(file_name, map_location="cpu", weights_only=True)
+        except TypeError:
+            # PyTorch versions before ``weights_only`` was introduced.
+            return torch.load(file_name, map_location="cpu")
+        except Exception:
+            # Legacy checkpoints pickle the custom module graph and therefore
+            # cannot be loaded by the restricted weights-only unpickler.
+            return torch.load(file_name, map_location="cpu", weights_only=False)
 
     def load_info_from_file(self, file_name: str):
 

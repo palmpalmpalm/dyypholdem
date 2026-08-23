@@ -67,6 +67,40 @@ with
 - `<street>`: the street the model is for (`1`= preflop, `2`= flop, `3`= turn, `4`= river)
 - `<mode>`: mode the model file was saved in torch7 (`binary`or `ascii`)
 
+### Recovering the original pretrained networks
+
+As verified on 2026-08-23, the eight model pointers remain in Git history but
+their GitHub LFS payloads return HTTP 410. The original four Torch7 networks
+and metadata linked from DeepHoldem issue #28 are still public. This fork has a
+checksum-pinned recovery and conversion path:
+
+```shell
+make model-recovery-progress   # read-only local status
+make recover-models            # resumable download, exact size/SHA-256 checks
+make compact-models            # convert and verify all four networks
+make compact-model-progress    # read-only compact-checkpoint status
+make gpu-model-validation-dry-run
+make gpu-model-validation      # guarded throwaway CUDA parity run
+```
+
+Downloads and generated checkpoints stay under ignored
+`runs/model-recovery/`. The compact native-PyTorch set is device-neutral and
+29,570,388 bytes, versus 566,797,072 bytes for the original model files. The
+conversion checks every source and parameter hash, compares deterministic
+legacy/native outputs, reloads every checkpoint, and verifies the range-weighted
+zero-sum constraint. The largest measured legacy/native output difference was
+`1.55e-6`.
+
+Use the compact set without modifying tracked model pointers:
+
+```shell
+export DYYPHOLDEM_COMPACT_MODEL_PATH="$PWD/runs/model-recovery/compact"
+cd src
+python player/dyypholdem_acpc_player.py <hostname> <port>
+```
+
+The old `.tar` loader remains supported when legacy LFS objects are available.
+
 
 
 ## Creating your own models

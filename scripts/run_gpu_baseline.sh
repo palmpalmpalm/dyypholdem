@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
-# Rent one throwaway GPU, benchmark DyypHoldem's river resolver, copy the
-# result home, and terminate the pod on every exit path.
+# Rent one throwaway GPU, run a DyypHoldem CUDA validation, copy the result
+# home, and terminate the pod on every exit path.
 set -euo pipefail
+
+MODEL_MODE=0
+DRY_RUN=0
+case "${1:-}" in
+  "") ;;
+  --dry-run) DRY_RUN=1 ;;
+  --models) MODEL_MODE=1 ;;
+  --models-dry-run) MODEL_MODE=1; DRY_RUN=1 ;;
+  *) echo "usage: $0 [--dry-run|--models|--models-dry-run]" >&2; exit 2 ;;
+esac
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 POD_HELPER="${DYYPHOLDEM_POD_HELPER:-/Users/palm/Documents/poker-supremus/scripts/runpod_cfv_pod.py}"
@@ -11,11 +21,18 @@ GUARD_SECONDS="${DYYPHOLDEM_GPU_GUARD_SECONDS:-3600}"
 MAX_CREATE_ATTEMPTS="${DYYPHOLDEM_GPU_CREATE_ATTEMPTS:-10}"
 GPU_TYPE="${DYYPHOLDEM_GPU_TYPE:-NVIDIA GeForce RTX 3090}"
 GPU_CLOUD_TYPE="${DYYPHOLDEM_GPU_CLOUD_TYPE:-COMMUNITY}"
-RUN_NAME="dyypholdem-river-$(date -u +%Y%m%dT%H%M%SZ)"
+COMPACT_MODEL_ROOT="${DYYPHOLDEM_COMPACT_MODEL_PATH:-$PROJECT_DIR/runs/model-recovery/compact}"
+if [ "$MODEL_MODE" = 1 ]; then
+  RUN_CATEGORY="gpu-model-validation"
+  RUN_NAME="dyypholdem-models-$(date -u +%Y%m%dT%H%M%SZ)"
+else
+  RUN_CATEGORY="gpu-baseline"
+  RUN_NAME="dyypholdem-river-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
 POD_NAME="$RUN_NAME-$PPID-$$"
 SOURCE_COMMIT="$(git -C "$PROJECT_DIR" rev-parse HEAD)"
-SOURCE_DIFF_SHA256="$(git -C "$PROJECT_DIR" diff -- src/nn/bucketer.py src/settings/arguments.py | shasum -a 256 | awk '{print $1}')"
-LOCAL_RUN_DIR="$PROJECT_DIR/runs/gpu-baseline/$RUN_NAME"
+SOURCE_DIFF_SHA256="$(git -C "$PROJECT_DIR" diff | shasum -a 256 | awk '{print $1}')"
+LOCAL_RUN_DIR="$PROJECT_DIR/runs/$RUN_CATEGORY/$RUN_NAME"
 TASK_TMP="$(mktemp -d)"
 SSH_CONFIG="$TASK_TMP/ssh-config"
 CREATE_JSON="$TASK_TMP/create.json"
@@ -23,24 +40,45 @@ POD_LIST_JSON="$TASK_TMP/pods.json"
 POD_ID=""
 REMOTE_READY=0
 
-if [ "${1:-}" = "--dry-run" ]; then
+if [ "$DRY_RUN" = 1 ]; then
+  if [ "$MODEL_MODE" = 1 ]; then
+    workload="all four compact value nets, CPU/CUDA parity plus inference timing"
+    assets="four local hash-verified compact checkpoints (28.20 MiB total)"
+  else
+    workload="river, 1,000 CFR iterations, two deterministic repeats"
+    assets="three hash-verified files (261.28 MiB total)"
+  fi
   printf '%s\n' \
-    "DyypHoldem GPU baseline dry run" \
+    "DyypHoldem GPU validation dry run" \
     "  source commit: $SOURCE_COMMIT" \
     "  GPU: one $GPU_CLOUD_TYPE $GPU_TYPE" \
-    "  workload: river, 1,000 CFR iterations, two deterministic repeats" \
-    "  assets: three hash-verified files (261.28 MiB total)" \
+    "  workload: $workload" \
+    "  assets: $assets" \
     "  hard guard: $GUARD_SECONDS seconds" \
     "  cleanup: stop, terminate, and verify exact-name pod absence"
   rm -rf "$TASK_TMP"
   exit 0
 fi
 
+if [ "$MODEL_MODE" = 1 ]; then
+  for model_file in \
+    preflop-aux/final_compact.pt \
+    flop/final_compact.pt \
+    turn/final_compact.pt \
+    river/final_compact.pt; do
+    [ -s "$COMPACT_MODEL_ROOT/$model_file" ] || {
+      echo "missing compact checkpoint: $COMPACT_MODEL_ROOT/$model_file" >&2
+      echo "run make recover-models compact-models first" >&2
+      exit 1
+    }
+  done
+fi
+
 copy_back() {
   if [ "$REMOTE_READY" = 1 ] && [ -s "$SSH_CONFIG" ]; then
     mkdir -p "$LOCAL_RUN_DIR"
     rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes -o ConnectTimeout=10" \
-      "cfvpod:/root/dyypholdem/runs/gpu-baseline/$RUN_NAME/" \
+      "cfvpod:/root/dyypholdem/runs/$RUN_CATEGORY/$RUN_NAME/" \
       "$LOCAL_RUN_DIR/" >/dev/null 2>&1 || true
   fi
 }
@@ -92,6 +130,7 @@ trap cleanup EXIT INT TERM
 [ -f "$POD_HELPER" ] || { echo "missing safe RunPod helper: $POD_HELPER" >&2; exit 1; }
 [ -f "$ENV_FILE" ] || { echo "missing ignored credential file: $ENV_FILE" >&2; exit 1; }
 set -a
+# shellcheck source=/dev/null
 source "$ENV_FILE"
 set +a
 
@@ -209,8 +248,6 @@ rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" \
   "$PROJECT_DIR/src" "$PROJECT_DIR/scripts" \
   cfvpod:/root/dyypholdem/
 
-"${SSH[@]}" cfvpod 'python3 -m pip install --quiet gdown loguru'
-
 gpu_healthy=0
 for _ in $(seq 1 18); do
   if "${SSH[@]}" cfvpod \
@@ -224,15 +261,27 @@ done
 "${SSH[@]}" cfvpod \
   'python3 -c "import torch; print(torch.cuda.get_device_name(0), torch.__version__)"'
 
-echo "materializing and verifying minimal river assets"
-"${SSH[@]}" cfvpod \
-  'cd /root/dyypholdem && python3 scripts/materialize_assets.py --profile river'
-
-REMOTE_READY=1
-echo "running DyypHoldem river CUDA baseline"
-"${SSH[@]}" cfvpod \
-  "set -o pipefail; cd /root/dyypholdem && mkdir -p runs/gpu-baseline/$RUN_NAME && timeout 1800s python3 scripts/gpu_baseline.py --street river --iterations 1000 --repeats 2 --seed 0 --source-commit $SOURCE_COMMIT --source-diff-sha256 $SOURCE_DIFF_SHA256 --expected-root-sha256 820d911cad2f15416b19b02e0e61de4b5740d8d6eeffaf15c1746d58361c5ca6 --expected-strategy-sha256 16529973d061d3c594a067fa251af7a44569377958b5f8255c748ab889610346 --output runs/gpu-baseline/$RUN_NAME/summary.json 2>&1 | tee runs/gpu-baseline/$RUN_NAME/run.log"
+if [ "$MODEL_MODE" = 1 ]; then
+  "${SSH[@]}" cfvpod \
+    'python3 -m pip install --quiet loguru && mkdir -p /root/dyypholdem/runs/model-recovery/compact'
+  rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" \
+    "$COMPACT_MODEL_ROOT/" \
+    cfvpod:/root/dyypholdem/runs/model-recovery/compact/
+  REMOTE_READY=1
+  echo "validating all compact value networks on CUDA"
+  "${SSH[@]}" cfvpod \
+    "set -o pipefail; cd /root/dyypholdem && mkdir -p runs/$RUN_CATEGORY/$RUN_NAME && timeout 600s python3 scripts/model_gpu_validation.py --model-root runs/model-recovery/compact --repeats 20 --source-commit $SOURCE_COMMIT --output runs/$RUN_CATEGORY/$RUN_NAME/summary.json 2>&1 | tee runs/$RUN_CATEGORY/$RUN_NAME/run.log"
+else
+  "${SSH[@]}" cfvpod 'python3 -m pip install --quiet gdown loguru'
+  echo "materializing and verifying minimal river assets"
+  "${SSH[@]}" cfvpod \
+    'cd /root/dyypholdem && python3 scripts/materialize_assets.py --profile river'
+  REMOTE_READY=1
+  echo "running DyypHoldem river CUDA baseline"
+  "${SSH[@]}" cfvpod \
+    "set -o pipefail; cd /root/dyypholdem && mkdir -p runs/$RUN_CATEGORY/$RUN_NAME && timeout 1800s python3 scripts/gpu_baseline.py --street river --iterations 1000 --repeats 2 --seed 0 --source-commit $SOURCE_COMMIT --source-diff-sha256 $SOURCE_DIFF_SHA256 --expected-root-sha256 820d911cad2f15416b19b02e0e61de4b5740d8d6eeffaf15c1746d58361c5ca6 --expected-strategy-sha256 16529973d061d3c594a067fa251af7a44569377958b5f8255c748ab889610346 --output runs/$RUN_CATEGORY/$RUN_NAME/summary.json 2>&1 | tee runs/$RUN_CATEGORY/$RUN_NAME/run.log"
+fi
 
 copy_back
 [ -s "$LOCAL_RUN_DIR/summary.json" ] || { echo "benchmark summary was not copied back" >&2; exit 1; }
-echo "DyypHoldem CUDA baseline copied to $LOCAL_RUN_DIR"
+echo "DyypHoldem CUDA validation copied to $LOCAL_RUN_DIR"
