@@ -1,0 +1,4 @@
+# Ephemeral Secure RunPod UI runtime (Python 3.11+).
+gdown==5.2.0
+loguru==0.7.3
+PokerKit==0.7.5

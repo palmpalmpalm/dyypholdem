@@ -31,7 +31,8 @@ def _load_pickle(path: str):
 def _load_timed(path: str, label: str):
     started = time.perf_counter()
     value = _load_pickle(path)
-    arguments.logger.loading(
+    arguments.logger.log(
+        "LOADING",
         f"{label} initialized in: {time.perf_counter() - started:.6f}s"
     )
     return value

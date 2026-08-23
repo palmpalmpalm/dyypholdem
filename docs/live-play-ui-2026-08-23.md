@@ -12,19 +12,62 @@ the human dealer seat and the unmodified game loop in
 
 ```text
 browser --HTTPS--> token-protected web seat --ACPC--> dealer <--ACPC-- DyypHoldem
+                              |
+                    PokerKit public-state validator
 ```
 
-Human buttons mirror the repository action abstraction: fold when facing a
-bet, check/call, pot-size raise, and all-in. HTTP action requests only enqueue
-an ACPC action and return immediately. The UI polls state while a long
-continual resolve runs, which stays below RunPod's HTTP proxy request timeout.
+The web seat requires Python 3.11+ and exact runtime pins in
+`requirements-play-ui.txt`: PokerKit 0.7.5 for legality plus the existing
+gdown and Loguru setup helpers. Importing the legacy web module does not load
+the external PokerKit package; production startup fails explicitly if the
+pinned validator is missing or has the wrong version.
+
+For every new public `MATCHSTATE`, the bridge replays betting once in PokerKit
+and caches an immutable legality snapshot under the same state nonce. ACPC
+player 0 (small blind) maps to PokerKit seat 1 and ACPC player 1 (big blind)
+maps to PokerKit seat 0. ACPC raises are cumulative hand commitments, so the
+adapter converts PokerKit's street-local minimum, half-pot, three-quarter-pot,
+pot, and maximum back to cumulative `r<raise_to>` amounts. A short all-in is
+exposed as a single legal point and does not incorrectly reopen raising.
+
+The canonical action request is
+`{"action":"fold|call|raise","state_nonce":N,"raise_to":chips}`. The bridge
+checks the nonce and the cached server-side range before formatting the ACPC
+action. The dealer remains authoritative for final acceptance. If validation
+or public-state reconstruction fails, the bridge offers no action and stops
+with a sanitized error.
+
+When `web/dist/index.html` exists, the server hosts that built frontend and its
+same-origin assets with traversal protection and a restrictive content
+security policy. Otherwise it serves the small bundled fallback. An initial
+`/?token=...` request is validated, converted to an HttpOnly, Secure,
+SameSite=Strict session cookie, and redirected to the clean `/` URL. API
+clients and lifecycle controllers may continue using `X-Session-Token`; query
+tokens are not accepted on API routes.
+
+The authenticated launch URL is a reusable bearer capability until the
+session ends. Keep it private. The redirect removes the token from the visible
+address bar and normal navigation, but does not revoke the original link.
+
+HTTP action requests only enqueue an ACPC action and return immediately. The
+UI polls state while a long continual resolve runs, which stays below RunPod's
+HTTP proxy request timeout.
 
 ## Launch and lifecycle
 
 ```shell
+make web-install
+make web-test
+make web-build
 make play-ui-dry-run
 make play-ui
 ```
+
+`make play-ui` repeats the locked frontend install, tests, and production
+build before the paid-resource preflight. The launcher refuses to rent a pod
+unless the resulting React document, JavaScript bundle, and stylesheet are
+present locally. It copies the built assets to the pod; Node.js is not needed
+on the GPU host.
 
 The controller:
 
@@ -32,11 +75,12 @@ The controller:
 2. creates exactly one Secure RTX 4090, explicitly requests a public IP, and
    exposes only `22/tcp` and `8000/http`;
 3. fixes an absolute paid-resource deadline, then arms both an authenticated
-   remote stop and an independent local API stop/delete watchdog;
+   remote retry-until-deleted guard and an independent local API stop/delete
+   watchdog;
 4. syncs code and compact checkpoints;
-5. uses the current official RunPod PyTorch 2.8 image, then downloads and
-   installs the two ephemeral Python helpers under Ubuntu's PEP 668 override
-   and checksums the full play asset profile;
+5. uses the current official RunPod PyTorch 2.8 image, then installs the pinned
+   ephemeral Python helpers under Ubuntu's PEP 668 override and checksums the
+   full play asset profile;
 6. validates all recovered networks on CUDA;
 7. starts dealer, UI, and real continual resolver;
 8. waits for initialization, proxy health, and the first authenticated playable

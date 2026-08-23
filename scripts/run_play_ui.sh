@@ -99,6 +99,27 @@ verify_models() {
   done
 }
 
+verify_play_ui_bundle() {
+  [ -s "$PROJECT_DIR/requirements-play-ui.txt" ] || {
+    echo "missing play UI Python requirements" >&2
+    return 1
+  }
+  [ -s "$PROJECT_DIR/web/dist/index.html" ] || {
+    echo "missing compiled play UI; run 'make web-build' before renting" >&2
+    return 1
+  }
+  find "$PROJECT_DIR/web/dist/assets" -maxdepth 1 -type f -name '*.js' -size +0c \
+    -print -quit 2>/dev/null | grep -q . || {
+      echo "compiled play UI has no JavaScript bundle" >&2
+      return 1
+    }
+  find "$PROJECT_DIR/web/dist/assets" -maxdepth 1 -type f -name '*.css' -size +0c \
+    -print -quit 2>/dev/null | grep -q . || {
+      echo "compiled play UI has no stylesheet bundle" >&2
+      return 1
+    }
+}
+
 acquire_launch_lock() {
   if mkdir "$LAUNCH_LOCK_DIR" 2>/dev/null; then
     LOCK_HELD=1
@@ -431,7 +452,7 @@ if [ "$COMMAND" = "dry-run" ]; then
     "  solver: real ACPC dealer + ContinualResolving, 1,000 CFR iterations" \
     "  models: four checksum-verified compact recovered networks" \
     "  telemetry: private JSONL plus safe live/final per-street reports" \
-    "  hard guard: $GUARD_SECONDS seconds; authenticated remote stop plus independent local stop/delete watchdog" \
+    "  hard guard: $GUARD_SECONDS seconds; authenticated remote retry-delete plus independent local stop/delete watchdog" \
     "  shutdown: quiesce, retry final copyback, exact-name stop/delete, six successful absence checks"
   exit 0
 fi
@@ -463,6 +484,7 @@ fi
 [ "$COMMAND" = "start" ] || { usage >&2; exit 2; }
 validate_config
 verify_models
+verify_play_ui_bundle
 load_credentials
 mkdir -p "$SESSION_ROOT"
 acquire_launch_lock
@@ -589,18 +611,20 @@ done
 
 remote_guard_seconds=$(( ABSOLUTE_STOP_EPOCH - $(date +%s) ))
 [ "$remote_guard_seconds" -gt 60 ] || { echo "setup left too little time to arm remote guard" >&2; exit 1; }
-printf '#!/usr/bin/env bash\nset -eu\nsleep %s\nrunpodctl stop pod %s\n' "$remote_guard_seconds" "$POD_ID" | \
+printf '#!/usr/bin/env bash\nset -u\nsleep %s\n# Keep requesting permanent deletion until this container is terminated.\nwhile true; do\n  runpodctl pod delete %s >/dev/null 2>&1 || runpodctl remove pod %s >/dev/null 2>&1 || true\n  sleep 15\ndone\n' "$remote_guard_seconds" "$POD_ID" "$POD_ID" | \
   "${SSH_STDIN[@]}" dyyui 'command -v runpodctl >/dev/null && umask 077 && cat > /root/dyypholdem_self_stop.sh && chmod 700 /root/dyypholdem_self_stop.sh'
-remote_guard_command="IFS= read -r RUNPOD_API_KEY && test -n \"\$RUNPOD_API_KEY\" && export RUNPOD_API_KEY && runpodctl get pod >/dev/null && (setsid nohup /root/dyypholdem_self_stop.sh >/root/dyypholdem_self_stop.log 2>&1 < /dev/null & guard=\$!; sleep 1; kill -0 \"\$guard\")"
+remote_guard_command="IFS= read -r RUNPOD_API_KEY && test -n \"\$RUNPOD_API_KEY\" && export RUNPOD_API_KEY && (runpodctl pod list >/dev/null 2>&1 || runpodctl get pod >/dev/null 2>&1) && (setsid nohup /root/dyypholdem_self_stop.sh >/root/dyypholdem_self_stop.log 2>&1 < /dev/null & guard=\$!; sleep 1; kill -0 \"\$guard\")"
 printf '%s\n' "$RUNPOD_API_KEY" | "${SSH_STDIN[@]}" dyyui "$remote_guard_command"
-echo "authenticated remote hard-deadline stop guard armed"
+echo "authenticated remote hard-deadline delete guard armed"
 
 "${SSH[@]}" dyyui 'if command -v rsync >/dev/null && command -v curl >/dev/null; then :; else (apt-get update -qq && apt-get install -y -qq rsync curl) >/dev/null 2>&1 || exit 1; fi; mkdir -p /root/dyypholdem /root/logs'
 rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" \
   --exclude .git --exclude .DS_Store --exclude __pycache__ --exclude runs \
+  --exclude node_modules --exclude coverage --exclude .vite \
   "$PROJECT_DIR/src" "$PROJECT_DIR/scripts" "$PROJECT_DIR/acpc_server" \
+  "$PROJECT_DIR/web" "$PROJECT_DIR/requirements-play-ui.txt" \
   dyyui:/root/dyypholdem/
-"${SSH[@]}" dyyui "python3 -m pip install --quiet --break-system-packages gdown loguru && mkdir -p /root/dyypholdem/runs/model-recovery/compact /root/dyypholdem/runs/play-ui/$RUN_NAME"
+"${SSH[@]}" dyyui "python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version' && python3 -m pip install --quiet --break-system-packages -r /root/dyypholdem/requirements-play-ui.txt && python3 -c 'import gdown, loguru, pokerkit; from importlib.metadata import version; assert version(\"gdown\") == \"5.2.0\"; assert version(\"loguru\") == \"0.7.3\"; assert version(\"PokerKit\") == \"0.7.5\"' && mkdir -p /root/dyypholdem/runs/model-recovery/compact /root/dyypholdem/runs/play-ui/$RUN_NAME"
 rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" "$MODEL_ROOT/" dyyui:/root/dyypholdem/runs/model-recovery/compact/
 rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" "$TOKEN_FILE" dyyui:/root/dyypholdem/session-token
 REMOTE_READY=1
@@ -643,6 +667,33 @@ for _ in $(seq 1 90); do
   sleep 4
 done
 [ "$proxy_ready" = 1 ] || { echo "RunPod HTTPS proxy did not become healthy" >&2; exit 1; }
+
+# Prove the bearer-token bootstrap, HttpOnly cookie, React document, and one
+# hashed static asset all work through the public HTTPS proxy before sharing it.
+COOKIE_JAR="$LOCAL_RUN_DIR/browser-cookie.jar"
+FRONTEND_HTML="$LOCAL_RUN_DIR/frontend-index.html"
+if ! curl -fsS --max-time 20 -L -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+    "$AUTHENTICATED_URL" > "$FRONTEND_HTML"; then
+  echo "authenticated browser session bootstrap failed" >&2
+  exit 1
+fi
+chmod 600 "$COOKIE_JAR" "$FRONTEND_HTML"
+grep -q '<div id="root"' "$FRONTEND_HTML" || {
+  echo "public proxy did not serve the compiled React table" >&2
+  exit 1
+}
+FRONTEND_ASSET="$($LOCAL_PYTHON - "$FRONTEND_HTML" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+match = re.search(r'(?:src|href)="(/assets/[^"]+\.(?:js|css))"', text)
+print(match.group(1) if match else "")
+PY
+)"
+[ -n "$FRONTEND_ASSET" ] || { echo "compiled React table references no hashed asset" >&2; exit 1; }
+curl -fsS --max-time 20 -b "$COOKIE_JAR" "$PUBLIC_URL$FRONTEND_ASSET" >/dev/null || {
+  echo "compiled React asset was not reachable through the proxy" >&2
+  exit 1
+}
 
 # AI_READY is emitted before the ACPC socket necessarily receives its first MATCHSTATE.
 # Do not publish the URL until the authenticated browser bridge proves real game state.

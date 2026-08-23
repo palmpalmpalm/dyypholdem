@@ -105,10 +105,24 @@ The old `.tar` loader remains supported when legacy LFS objects are available.
 
 ## Live browser game on an RTX 4090
 
-This fork can launch a guarded one-hour RunPod session containing the bundled
+This fork can launch a guarded RunPod session (one-hour default, four-hour
+maximum) containing the bundled
 ACPC dealer, the real `ContinualResolving` player, and a token-protected browser
 seat. It reuses the four compact recovered checkpoints and downloads only the
 checksum-verified runtime tables.
+
+The browser bridge uses PokerKit as a second, fail-closed legality check for
+arbitrary no-limit raise sizes. Its import stays behind a lazy boundary so the
+legacy Python 3.9 test environment can still import the bridge; the live UI
+host requires Python 3.11 or newer and exactly PokerKit 0.7.5:
+
+```shell
+python3.12 -m pip install -r requirements-play-ui.txt
+```
+
+The dealer still owns the game state and final action acceptance. PokerKit
+replays each public `MATCHSTATE` once and supplies call, minimum, fractional
+pot, pot, and all-in amounts to the browser; it does not replace the dealer.
 
 ```shell
 make play-ui-dry-run
@@ -132,8 +146,8 @@ make play-ui-stop
 
 The controller copies artifacts home about every 12 seconds, stops and
 terminates the exact session pod at the deadline, and verifies that the pod no
-longer exists. An authenticated remote stop and an independent local API
-stop/delete watchdog enforce the same absolute deadline. Live browser
+longer exists. An authenticated remote retry-until-deleted guard and an
+independent local API stop/delete watchdog enforce the same absolute deadline. Live browser
 telemetry intentionally excludes private strategy vectors; full private
 decision JSONL and raw dealer/bot logs remain only in the ignored local run
 directory. See [`docs/live-play-ui-2026-08-23.md`](docs/live-play-ui-2026-08-23.md)

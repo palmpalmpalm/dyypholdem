@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -41,6 +41,19 @@ class BucketerLazyLoadingTest(unittest.TestCase):
         self.assertIsNone(bucketer._turn_cats)
         self.assertIsNone(bucketer._ihr_pair_to_bucket)
         self.assertIsNone(bucketer._river_ihr)
+
+    def test_lazy_initialization_uses_configured_logger_log_method(self):
+        logger = Mock(spec_set=["log"])
+        with (
+            patch.object(bucketer.arguments, "logger", logger),
+            patch.object(bucketer, "_load_pickle", return_value={1: 2}),
+        ):
+            bucketer.initialize(2)
+
+        logger.log.assert_called_once()
+        level, message = logger.log.call_args.args
+        self.assertEqual(level, "LOADING")
+        self.assertIn("Flop categories initialized in:", message)
 
     def test_river_count_does_not_load_river_category_table(self):
         with patch.object(
