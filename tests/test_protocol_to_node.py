@@ -76,6 +76,64 @@ class ProtocolToNodeTest(unittest.TestCase):
         self.assertEqual(len(tree.children), 2)
         self.assertTrue(all(child.terminal for child in tree.children))
 
+    def test_pre_river_all_in_call_is_terminal_after_board_runout(self):
+        message = (
+            "MATCHSTATE:0:55:r200c/cc/cr20000c/:"
+            "5c6d|AsAd/2c3d4h/5s/7c"
+        )
+
+        with mock.patch.object(arguments, "Tensor", torch.FloatTensor):
+            state = protocol_to_node.parse_state(message)
+
+        self.assertEqual(state.current_street, 4)
+        self.assertEqual(state.actions_raw, ["r200c", "cc", "cr20000c", ""])
+        self.assertEqual((state.bet1, state.bet2), (20000, 20000))
+        self.assertEqual(state.acting_player, constants.Players.Chance)
+
+    def test_non_all_in_call_still_transitions_to_the_next_street(self):
+        message = "MATCHSTATE:0:1:r200c/:5c6d|/2c3d4h"
+
+        with mock.patch.object(arguments, "Tensor", torch.FloatTensor):
+            state = protocol_to_node.parse_state(message)
+
+        self.assertEqual(state.current_street, 2)
+        self.assertEqual((state.bet1, state.bet2), (200, 200))
+        self.assertEqual(state.acting_player, constants.Players.P2)
+
+    def test_uncalled_all_in_still_requires_opponent_action(self):
+        with mock.patch.object(arguments, "Tensor", torch.FloatTensor):
+            state = protocol_to_node.parse_state(
+                "MATCHSTATE:0:2:r20000:5c6d|"
+            )
+
+        self.assertEqual((state.bet1, state.bet2), (20000, 100))
+        self.assertEqual(state.acting_player, constants.Players.P2)
+
+    def test_preflop_all_in_call_is_terminal_after_full_runout(self):
+        message = (
+            "MATCHSTATE:0:3:r20000c/:"
+            "5c6d|AsAd/2c3d4h/5s/7c"
+        )
+
+        with mock.patch.object(arguments, "Tensor", torch.FloatTensor):
+            state = protocol_to_node.parse_state(message)
+
+        self.assertEqual(state.current_street, 4)
+        self.assertEqual((state.bet1, state.bet2), (20000, 20000))
+        self.assertEqual(state.acting_player, constants.Players.Chance)
+
+    def test_river_check_check_remains_terminal(self):
+        message = (
+            "MATCHSTATE:0:4:cc/cc/cc/cc:"
+            "5c6d|AsAd/2c3d4h/5s/7c"
+        )
+
+        with mock.patch.object(arguments, "Tensor", torch.FloatTensor):
+            state = protocol_to_node.parse_state(message)
+
+        self.assertEqual(state.current_street, 4)
+        self.assertEqual(state.acting_player, constants.Players.Chance)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -327,6 +327,20 @@ def _get_acting_player(processed_state: ProcessedState):
         return constants.Players.P1
 
     last_action = processed_state.all_actions[len(processed_state.all_actions) - 1]
+
+    # When an all-in call happens before the river, the dealer runs out the
+    # remaining board and sends the completed state on the final street.  The
+    # last betting action still belongs to the earlier street, so recognize the
+    # terminal call before treating the street change as a new action round.
+    if (last_action.action == constants.ACPCActions.ccall and
+            len(processed_state.all_actions) >= 2):
+        previous_action = processed_state.all_actions[-2]
+        if (previous_action.action == constants.ACPCActions.rraise and
+                previous_action.raise_amount == game_settings.stack and
+                previous_action.street == last_action.street and
+                previous_action.player != last_action.player):
+            return constants.Players.Chance
+
     # has the street changed since the last action?
     if last_action.street != processed_state.current_street:
         return constants.Players.P2
