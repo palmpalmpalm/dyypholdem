@@ -34,7 +34,8 @@ The controller:
 3. fixes an absolute paid-resource deadline, then arms both an authenticated
    remote stop and an independent local API stop/delete watchdog;
 4. syncs code and compact checkpoints;
-5. downloads and checksums the full play asset profile;
+5. uses the current official RunPod PyTorch 2.8 image, then downloads and
+   checksums the full play asset profile;
 6. validates all recovered networks on CUDA;
 7. starts dealer, UI, and real continual resolver;
 8. waits for initialization, proxy health, and the first authenticated playable

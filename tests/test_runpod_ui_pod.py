@@ -9,13 +9,14 @@ from unittest import mock
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "scripts"))
 
-from runpod_ui_pod import PodNotFound, build_create_payload, cmd_exists, safe_status  # noqa: E402
+from runpod_ui_pod import DEFAULT_IMAGE, PodNotFound, build_create_payload, cmd_exists, safe_status  # noqa: E402
 
 
 class RunPodUiPodTest(unittest.TestCase):
     def test_payload_exposes_only_ssh_and_ui(self):
         payload = build_create_payload("test", "ssh-key")
         self.assertEqual(payload["gpuTypeIds"], ["NVIDIA GeForce RTX 4090"])
+        self.assertEqual(payload["imageName"], DEFAULT_IMAGE)
         self.assertEqual(payload["cloudType"], "SECURE")
         self.assertEqual(payload["ports"], ["22/tcp", "8000/http"])
         self.assertTrue(payload["supportPublicIp"])

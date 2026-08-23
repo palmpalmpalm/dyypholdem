@@ -13,7 +13,8 @@ import urllib.request
 
 
 REST_BASE_URL = "https://rest.runpod.io/v1"
-DEFAULT_IMAGE = "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04"
+# Current image behind RunPod's official ``runpod-torch-v280`` template.
+DEFAULT_IMAGE = "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
 
 
 class PodNotFound(RuntimeError):
