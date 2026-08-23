@@ -44,6 +44,16 @@ class PokerTreeBuilder(object):
     def _get_children_nodes_player_node(self, parent_node):
         children = []
 
+        opening_blind_state = (
+            parent_node.street == 1 and
+            parent_node.current_player == constants.Players.P1 and
+            parent_node.num_bets == 1 and
+            ((parent_node.bets[0].item() == game_settings.small_blind and
+              parent_node.bets[1].item() == game_settings.big_blind) or
+             (parent_node.bets[0].item() == game_settings.big_blind and
+              parent_node.bets[1].item() == game_settings.small_blind))
+        )
+
         # Action 1: fold
         fold_node = TreeNode()
         fold_node.type = constants.NodeTypes.terminal_fold
@@ -56,7 +66,7 @@ class PokerTreeBuilder(object):
         children.append(fold_node)
 
         # Action 2: check/call
-        if ((parent_node.street == 1 and parent_node.current_player == constants.Players.P1 and parent_node.num_bets == 1) or
+        if (opening_blind_state or
                 ((parent_node.street != 1 or constants.streets_count == 1) and
                  parent_node.current_player == constants.Players.P2 and parent_node.bets[0].item() == parent_node.bets[1].item())):
             check_node = TreeNode()

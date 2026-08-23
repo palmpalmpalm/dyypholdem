@@ -114,7 +114,15 @@ def parsed_state_to_node(parsed_state: ProcessedState) -> TreeNode:
     node.board = card_to_string.string_to_board(parsed_state.board)
     node.current_player = parsed_state.acting_player
     node.bets = arguments.Tensor([parsed_state.bet1, parsed_state.bet2])
-    if parsed_state.bet1 != parsed_state.bet2:
+    # `num_bets == 1` has a special meaning in the preflop tree builder: it
+    # identifies the untouched small-blind/big-blind root where calling the
+    # blind leaves the big blind an option to check.  It is not a generic
+    # "bets are unequal" flag.  In particular, a player facing an all-in must
+    # get a terminal call node rather than a nonterminal check node.
+    if ((parsed_state.bet1 == game_settings.small_blind and
+         parsed_state.bet2 == game_settings.big_blind) or
+            (parsed_state.bet1 == game_settings.big_blind and
+             parsed_state.bet2 == game_settings.small_blind)):
         node.num_bets = 1
     return node
 
