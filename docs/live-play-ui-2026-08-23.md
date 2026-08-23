@@ -35,7 +35,8 @@ The controller:
    remote stop and an independent local API stop/delete watchdog;
 4. syncs code and compact checkpoints;
 5. uses the current official RunPod PyTorch 2.8 image, then downloads and
-   checksums the full play asset profile;
+   installs the two ephemeral Python helpers under Ubuntu's PEP 668 override
+   and checksums the full play asset profile;
 6. validates all recovered networks on CUDA;
 7. starts dealer, UI, and real continual resolver;
 8. waits for initialization, proxy health, and the first authenticated playable

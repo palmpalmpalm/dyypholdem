@@ -600,7 +600,7 @@ rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" \
   --exclude .git --exclude .DS_Store --exclude __pycache__ --exclude runs \
   "$PROJECT_DIR/src" "$PROJECT_DIR/scripts" "$PROJECT_DIR/acpc_server" \
   dyyui:/root/dyypholdem/
-"${SSH[@]}" dyyui "python3 -m pip install --quiet gdown loguru; mkdir -p /root/dyypholdem/runs/model-recovery/compact /root/dyypholdem/runs/play-ui/$RUN_NAME"
+"${SSH[@]}" dyyui "python3 -m pip install --quiet --break-system-packages gdown loguru && mkdir -p /root/dyypholdem/runs/model-recovery/compact /root/dyypholdem/runs/play-ui/$RUN_NAME"
 rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" "$MODEL_ROOT/" dyyui:/root/dyypholdem/runs/model-recovery/compact/
 rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" "$TOKEN_FILE" dyyui:/root/dyypholdem/session-token
 REMOTE_READY=1
