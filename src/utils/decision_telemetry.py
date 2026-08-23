@@ -88,29 +88,60 @@ def summarize_values(values: Iterable[float]) -> dict[str, float | int]:
     }
 
 
+def normalized_hand_number(value: object) -> int | None:
+    """Normalize legacy ACPC string hand ids without accepting loose coercions."""
+
+    if type(value) is int and value >= 0:
+        return value
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return int(value)
+    return None
+
+
 def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object]) -> dict[str, object]:
     event_list = list(events)
     decisions = [event for event in event_list if event.get("event") == "decision"]
+    hand_results = [event for event in event_list if event.get("event") == "hand_result"]
     initializations = [event for event in event_list if event.get("event") == "initialization"]
     initialization = initializations[-1] if initializations else None
     grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
     for decision in decisions:
         grouped[str(decision.get("street", "unknown"))].append(decision)
 
-    by_street: dict[str, object] = {}
-    for street in STREETS:
-        street_events = grouped.get(street, [])
+    def summarize_decisions(street_events: list[dict[str, object]]) -> dict[str, object]:
         phase_summary = {
             field.removesuffix("_seconds"): summarize_values(
                 float(item.get(field, 0.0)) for item in street_events
             )
             for field in PHASE_FIELDS
         }
-        by_street[street] = {
+        return {
             "decisions": len(street_events),
             "timing_seconds": phase_summary,
             "latest_action": street_events[-1].get("chosen_action") if street_events else None,
         }
+
+    by_street: dict[str, object] = {}
+    for street in STREETS:
+        street_events = grouped.get(street, [])
+        by_street[street] = summarize_decisions(street_events)
+
+    preflop_events = grouped.get("preflop", [])
+    preflop_modes = {
+        "cached_root": summarize_decisions(
+            [item for item in preflop_events if item.get("reused_root_precompute") is True]
+        ),
+        "fresh_resolve": summarize_decisions(
+            [item for item in preflop_events if item.get("reused_root_precompute") is not True]
+        ),
+    }
+
+    completed_hand_numbers = {
+        hand_number
+        for item in hand_results
+        if (hand_number := normalized_hand_number(item.get("hand_number"))) is not None
+    }
+    latest_hand_result = hand_results[-1] if hand_results else {}
 
     recent = []
     for item in decisions[-12:]:
@@ -136,7 +167,13 @@ def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object
         "metadata": metadata,
         "initialization": initialization,
         "decision_count": len(decisions),
+        "match": {
+            "hands_completed": len(completed_hand_numbers),
+            "latest_hand_number": max(completed_hand_numbers) if completed_hand_numbers else None,
+            "cumulative_winnings": int(latest_hand_result.get("cumulative_winnings", 0)),
+        },
         "by_street": by_street,
+        "preflop_solve_modes": preflop_modes,
         "recent_decisions": recent,
     }
 
@@ -147,6 +184,8 @@ def render_text_report(report: dict[str, object]) -> str:
         "DyypHoldem live calculation report",
         f"Updated: {report.get('updated_at')}",
         f"Decisions: {report.get('decision_count', 0)}",
+        f"Hands completed: {int((report.get('match') or {}).get('hands_completed', 0))}",
+        f"Bot winnings: {int((report.get('match') or {}).get('cumulative_winnings', 0))} chips",
         f"GPU: {metadata.get('gpu_name', 'unknown')}",
         f"CFR: {metadata.get('cfr_iterations', 'unknown')} iterations "
         f"({metadata.get('cfr_skip_iterations', 'unknown')} skipped)",
@@ -162,6 +201,14 @@ def render_text_report(report: dict[str, object]) -> str:
             f"- {street}: n={data['decisions']}, response mean={total['mean']:.6f}, "
             f"p50={total['p50']:.6f}, p95={total['p95']:.6f}, max={total['max']:.6f}, "
             f"CFR mean={cfr['mean']:.6f}"
+        )
+    lines.extend(["", "Preflop timing split (seconds)"])
+    for mode in ("cached_root", "fresh_resolve"):
+        data = report["preflop_solve_modes"][mode]
+        total = data["timing_seconds"]["total_response"]
+        lines.append(
+            f"- {mode}: n={data['decisions']}, response mean={total['mean']:.6f}, "
+            f"p50={total['p50']:.6f}, p95={total['p95']:.6f}, max={total['max']:.6f}"
         )
     return "\n".join(lines) + "\n"
 

@@ -77,7 +77,7 @@ def run(server, port):
                 telemetry_writer.append(
                     {
                         "event": "hand_result",
-                        "hand_number": current_state.hand_number,
+                        "hand_number": int(current_state.hand_number),
                         "winnings": int(hand_winnings),
                         "cumulative_winnings": int(winnings),
                     }
@@ -94,6 +94,7 @@ if __name__ == "__main__":
     parser.add_argument("--telemetry", type=Path, default=None, help="private decision JSONL output")
     parser.add_argument("--report", type=Path, default=None, help="safe live JSON timing report")
     parser.add_argument("--text-report", type=Path, default=None, help="safe live text timing report")
+    parser.add_argument("--seed", type=int, default=None, help="seed Torch and Python action sampling")
     args = parser.parse_args()
 
     import gc
@@ -110,6 +111,14 @@ if __name__ == "__main__":
     from utils.decision_telemetry import DecisionTelemetryWriter, model_manifest
 
     import utils.pseudo_random as random_
+
+    if args.seed is not None:
+        if not 0 <= args.seed <= 2_147_483_647:
+            raise SystemExit("seed must be between 0 and 2147483647")
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        random_.rng.seed(args.seed)
 
     continual_resolving = ContinualResolving()
 
@@ -131,6 +140,7 @@ if __name__ == "__main__":
                 "gpu_name": gpu_name,
                 "cfr_iterations": arguments.cfr_iters,
                 "cfr_skip_iterations": arguments.cfr_skip_iters,
+                "bot_seed": args.seed,
                 "compact_models": model_manifest(compact_root),
             },
         )

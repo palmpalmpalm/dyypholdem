@@ -23,6 +23,8 @@ class DecisionTelemetryTest(unittest.TestCase):
             {"event": "decision", "street": "flop", "total_response_seconds": 3, "cfr_seconds": 2, "chance_reconstruction_seconds": 1.5, "strategy": [{"probability": 1.0}]},
             {"event": "decision", "street": "flop", "total_response_seconds": 5, "cfr_seconds": 4, "chosen_action": "call"},
             {"event": "decision", "street": "river", "total_response_seconds": 1, "cfr_seconds": 0.5},
+            {"event": "hand_result", "hand_number": "0", "winnings": 150, "cumulative_winnings": 150},
+            {"event": "hand_result", "hand_number": 1, "winnings": -50, "cumulative_winnings": 100},
         ]
         report = build_report(events, {"gpu_name": "test"})
         self.assertEqual(report["by_street"]["flop"]["decisions"], 2)
@@ -30,14 +32,42 @@ class DecisionTelemetryTest(unittest.TestCase):
         self.assertEqual(report["by_street"]["flop"]["timing_seconds"]["total_response"]["p50"], 4)
         self.assertEqual(report["by_street"]["flop"]["timing_seconds"]["chance_reconstruction"]["max"], 1.5)
         self.assertNotIn("strategy", report["recent_decisions"][0])
+        self.assertEqual(report["match"]["hands_completed"], 2)
+        self.assertEqual(report["match"]["cumulative_winnings"], 100)
+
+    def test_preflop_report_separates_cached_root_from_fresh_resolves(self):
+        events = [
+            {
+                "event": "decision",
+                "street": "preflop",
+                "reused_root_precompute": True,
+                "total_response_seconds": 0.02,
+            },
+            {
+                "event": "decision",
+                "street": "preflop",
+                "reused_root_precompute": False,
+                "total_response_seconds": 5.0,
+            },
+        ]
+        report = build_report(events, {})
+        self.assertEqual(report["preflop_solve_modes"]["cached_root"]["decisions"], 1)
+        self.assertEqual(report["preflop_solve_modes"]["fresh_resolve"]["decisions"], 1)
+        self.assertEqual(
+            report["preflop_solve_modes"]["fresh_resolve"]["timing_seconds"]["total_response"]["max"],
+            5.0,
+        )
 
     def test_writer_refreshes_json_and_text_reports(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             writer = DecisionTelemetryWriter(root / "decisions.jsonl", root / "report.json", root / "report.txt", {"gpu_name": "test"})
             writer.append({"event": "decision", "street": "turn", "total_response_seconds": 2.5})
+            writer.append({"event": "hand_result", "hand_number": 0, "cumulative_winnings": 125})
             self.assertIn('"decision_count": 1', (root / "report.json").read_text())
             self.assertIn("turn: n=1", (root / "report.txt").read_text())
+            self.assertIn("Hands completed: 1", (root / "report.txt").read_text())
+            self.assertIn("Bot winnings: 125 chips", (root / "report.txt").read_text())
 
 
 if __name__ == "__main__":

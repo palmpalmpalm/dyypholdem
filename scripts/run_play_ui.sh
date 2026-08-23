@@ -19,6 +19,8 @@ GPU_TYPE="${DYYPHOLDEM_GPU_TYPE:-NVIDIA GeForce RTX 4090}"
 CLOUD_TYPE="${DYYPHOLDEM_GPU_CLOUD_TYPE:-SECURE}"
 HANDS="${DYYPHOLDEM_UI_HANDS:-100}"
 SEED="${DYYPHOLDEM_UI_SEED:-20260823}"
+OPPONENT="${DYYPHOLDEM_UI_OPPONENT:-human}"
+OPPONENT_SEED="${DYYPHOLDEM_UI_OPPONENT_SEED:-20260824}"
 MODEL_ROOT="${DYYPHOLDEM_COMPACT_MODEL_PATH:-$PROJECT_DIR/runs/model-recovery/compact}"
 HTTP_PORT=8000
 FINALIZE_MARGIN_SECONDS=90
@@ -75,6 +77,11 @@ validate_config() {
   validate_uint DYYPHOLDEM_UI_GUARD_SECONDS "$GUARD_SECONDS" 900 14400
   validate_uint DYYPHOLDEM_UI_HANDS "$HANDS" 1 1000
   validate_uint DYYPHOLDEM_UI_SEED "$SEED" 0 2147483647
+  validate_uint DYYPHOLDEM_UI_OPPONENT_SEED "$OPPONENT_SEED" 0 2147483647
+  [ "$OPPONENT" = "human" ] || [ "$OPPONENT" = "random" ] || {
+    echo "DYYPHOLDEM_UI_OPPONENT must be human or random" >&2
+    return 1
+  }
   [ "$CLOUD_TYPE" = "SECURE" ] || [ "$CLOUD_TYPE" = "COMMUNITY" ] || {
     echo "DYYPHOLDEM_GPU_CLOUD_TYPE must be SECURE or COMMUNITY" >&2
     return 1
@@ -443,7 +450,21 @@ PY
 
 remote_process_state() {
   ssh -n -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=10 dyyui \
-    "for role in dealer ui bot; do file=/root/dyypholdem/runs/play-ui/$RUN_NAME/\$role.pid; pid=\$([ -s \"\$file\" ] && tr -cd '0-9' < \"\$file\"); if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then printf '%s=running ' \"\$role\"; else printf '%s=dead ' \"\$role\"; fi; done; echo"
+    "for role in dealer ui bot autoplay; do file=/root/dyypholdem/runs/play-ui/$RUN_NAME/\$role.pid; pid=\$([ -s \"\$file\" ] && tr -cd '0-9' < \"\$file\"); if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then printf '%s=running ' \"\$role\"; else printf '%s=dead ' \"\$role\"; fi; done; echo"
+}
+
+validate_random_completion() {
+  [ "$OPPONENT" = "random" ] || return 0
+  [ "$REMOTE_READY" = 1 ] && [ -s "$SSH_CONFIG" ] || return 1
+  for _ in $(seq 1 3); do
+    if ssh -n -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=10 dyyui \
+        "python3 /root/dyypholdem/scripts/validate_random_benchmark.py --run-dir /root/dyypholdem/runs/play-ui/$RUN_NAME --hands '$HANDS'"
+    then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
 }
 
 controller_state() {
@@ -539,6 +560,7 @@ if [ "$COMMAND" = "dry-run" ]; then
     "  GPU: one $CLOUD_TYPE $GPU_TYPE" \
     "  public service: authenticated HTTPS proxy on port $HTTP_PORT" \
     "  solver: real ACPC dealer + ContinualResolving, 1,000 CFR iterations" \
+    "  opponent: $OPPONENT${OPPONENT_SEED:+ (seed $OPPONENT_SEED)}" \
     "  models: four checksum-verified compact recovered networks" \
     "  telemetry: private JSONL plus safe live/final per-street reports" \
     "  controller: detached locally; start waits up to $CONTROLLER_READY_WAIT_SECONDS seconds for PLAY_UI_READY" \
@@ -744,7 +766,7 @@ echo "validating recovered networks on CUDA"
 "${SSH[@]}" dyyui "cd /root/dyypholdem && timeout 600s python3 scripts/model_gpu_validation.py --model-root runs/model-recovery/compact --repeats 2 --source-commit $(git -C "$PROJECT_DIR" rev-parse HEAD) --output runs/play-ui/$RUN_NAME/model-validation.json > runs/play-ui/$RUN_NAME/model-validation.log 2>&1"
 
 echo "starting dealer, authenticated UI, and real continual resolver"
-"${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD); cd /root/dyypholdem && ./scripts/start_play_ui_remote.sh '$RUN_NAME' '$HANDS' '$SEED' /root/dyypholdem/session-token"
+"${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD); cd /root/dyypholdem && ./scripts/start_play_ui_remote.sh '$RUN_NAME' '$HANDS' '$SEED' /root/dyypholdem/session-token '$OPPONENT' '$OPPONENT_SEED'"
 
 ai_ready=0
 for _ in $(seq 1 120); do
@@ -880,10 +902,22 @@ PY
         break
         ;;
       *"dealer=running"*"bot=dead"*)
-        echo "bot process exited while dealer remained active; terminating early" >&2
-        FINAL_REASON="bot_process_exited"
-        run_result=1
-        break
+        if [ "${ui_status:-unknown}" = "match_complete" ]; then
+          [ "$completion_detected_epoch" -ne 0 ] || completion_detected_epoch="$(date +%s)"
+        else
+          echo "bot process exited while dealer remained active; terminating early" >&2
+          FINAL_REASON="bot_process_exited"
+          run_result=1
+          break
+        fi
+        ;;
+      *"dealer=running"*"autoplay=dead"*)
+        if [ "$OPPONENT" = "random" ] && [ "${ui_status:-unknown}" != "match_complete" ]; then
+          echo "random opponent process exited before match completion; terminating early" >&2
+          FINAL_REASON="random_opponent_exited"
+          run_result=1
+          break
+        fi
         ;;
       *"dealer=dead"*)
         [ "$completion_detected_epoch" -ne 0 ] || completion_detected_epoch="$(date +%s)"
@@ -899,7 +933,26 @@ PY
   sleep 12
 done
 
+# A final hand can land inside the 60-second process-drain grace but before the
+# 90-second provider-finalization margin. Accept it immediately when both sides'
+# exact artifacts already prove clean completion.
+if [ "$OPPONENT" = "random" ] && [ "$FINAL_REASON" = "running" ] && \
+    [ "$completion_detected_epoch" -ne 0 ] && validate_random_completion; then
+  FINAL_REASON="match_complete"
+fi
 [ -n "$FINAL_REASON" ] && [ "$FINAL_REASON" != "running" ] || FINAL_REASON="guard_finalize_margin"
+if [ "$OPPONENT" = "random" ]; then
+  if [ "$FINAL_REASON" = "match_complete" ]; then
+    if ! validate_random_completion; then
+      echo "100-hand random benchmark failed final artifact validation" >&2
+      FINAL_REASON="random_completion_validation_failed"
+      run_result=1
+    fi
+  elif [ "$run_result" -eq 0 ]; then
+    echo "random benchmark ended before all $HANDS hands completed" >&2
+    run_result=1
+  fi
+fi
 trap - EXIT INT TERM
 release_launch_lock
 if ! finalize_session "$FINAL_REASON"; then

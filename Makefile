@@ -1,4 +1,4 @@
-.PHONY: test web-install web-test web-build model-recovery-progress recover-models compact-model-progress compact-models gpu-model-validation-dry-run gpu-model-validation gpu-baseline-dry-run gpu-baseline play-ui-dry-run play-ui play-ui-status play-ui-logs play-ui-stop
+.PHONY: test web-install web-test web-build model-recovery-progress recover-models compact-model-progress compact-models gpu-model-validation-dry-run gpu-model-validation gpu-baseline-dry-run gpu-baseline play-ui-dry-run play-ui play-ui-status play-ui-logs play-ui-stop random-benchmark-dry-run random-benchmark
 
 PYTHON ?= /Users/palm/opt/miniconda3/bin/python3
 NPM ?= npm
@@ -53,3 +53,9 @@ play-ui-logs:
 
 play-ui-stop:
 	./scripts/run_play_ui.sh stop
+
+random-benchmark-dry-run: web-test web-build
+	DYYPHOLDEM_UI_HANDS=100 DYYPHOLDEM_UI_OPPONENT=random ./scripts/run_play_ui.sh dry-run
+
+random-benchmark: web-test web-build
+	DYYPHOLDEM_UI_HANDS=100 DYYPHOLDEM_UI_OPPONENT=random ./scripts/run_play_ui.sh start

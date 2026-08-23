@@ -166,7 +166,7 @@ class ContinualResolving(object):
         self.last_decision_telemetry = {
             "event": "decision",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "hand_number": state.hand_number,
+            "hand_number": int(state.hand_number),
             "decision_number": self.decision_id,
             "street": street,
             "street_number": node.street,

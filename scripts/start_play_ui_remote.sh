@@ -2,8 +2,8 @@
 # Start the dealer, authenticated human web seat, and real DyypHoldem player.
 set -euo pipefail
 
-if [ "$#" -ne 4 ]; then
-  echo "usage: $0 RUN_NAME HANDS SEED TOKEN_FILE" >&2
+if [ "$#" -lt 4 ] || [ "$#" -gt 6 ]; then
+  echo "usage: $0 RUN_NAME HANDS SEED TOKEN_FILE [human|random] [OPPONENT_SEED]" >&2
   exit 2
 fi
 
@@ -12,6 +12,8 @@ RUN_NAME="$1"
 HANDS="$2"
 SEED="$3"
 TOKEN_FILE="$4"
+OPPONENT="${5:-human}"
+OPPONENT_SEED="${6:-20260824}"
 RUN_DIR="$PROJECT_DIR/runs/play-ui/$RUN_NAME"
 
 case "$RUN_NAME" in
@@ -19,6 +21,8 @@ case "$RUN_NAME" in
 esac
 [[ "$HANDS" =~ ^[0-9]+$ ]] && [ "$HANDS" -gt 0 ] || { echo "invalid hands" >&2; exit 2; }
 [[ "$SEED" =~ ^[0-9]+$ ]] || { echo "invalid seed" >&2; exit 2; }
+[ "$OPPONENT" = "human" ] || [ "$OPPONENT" = "random" ] || { echo "invalid opponent" >&2; exit 2; }
+[[ "$OPPONENT_SEED" =~ ^[0-9]+$ ]] || { echo "invalid opponent seed" >&2; exit 2; }
 [ -s "$TOKEN_FILE" ] || { echo "missing session token" >&2; exit 2; }
 
 mkdir -p "$RUN_DIR" /root/logs
@@ -63,17 +67,32 @@ done
 [ "$ui_ready" = 1 ] || { echo "web UI did not become healthy" >&2; exit 1; }
 
 setsid nohup python3 player/dyypholdem_acpc_player.py 127.0.0.1 18902 \
+  --seed "$SEED" \
   --telemetry "$RUN_DIR/decisions.jsonl" \
   --report "$RUN_DIR/timing_report.json" \
   --text-report "$RUN_DIR/timing_report.txt" \
   >"$RUN_DIR/bot.log" 2>&1 < /dev/null &
 echo "$!" > "$RUN_DIR/bot.pid"
 
+if [ "$OPPONENT" = "random" ]; then
+  setsid nohup python3 player/random_ui_player.py \
+    --base-url http://127.0.0.1:8000 \
+    --token-file "$TOKEN_FILE" \
+    --seed "$OPPONENT_SEED" \
+    --hands "$HANDS" \
+    --events "$RUN_DIR/random-events.jsonl" \
+    --summary "$RUN_DIR/random-summary.json" \
+    >"$RUN_DIR/autoplay.log" 2>&1 < /dev/null &
+  echo "$!" > "$RUN_DIR/autoplay.pid"
+fi
+
 cat > "$RUN_DIR/environment.json" <<EOF
 {
   "run_name": "$RUN_NAME",
   "hands": $HANDS,
   "seed": $SEED,
+  "opponent": "$OPPONENT",
+  "opponent_seed": $OPPONENT_SEED,
   "http_port": 8000,
   "dealer_ports": [18901, 18902]
 }
