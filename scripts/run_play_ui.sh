@@ -11,6 +11,9 @@ LOCAL_PYTHON="${LOCAL_PYTHON:-python3}"
 SESSION_ROOT="$PROJECT_DIR/runs/play-ui"
 CURRENT_MANIFEST="$SESSION_ROOT/current.json"
 LAUNCH_LOCK_DIR="$SESSION_ROOT/start.lock"
+CONTROLLER_LOG="$SESSION_ROOT/controller.log"
+CONTROLLER_PID_FILE="$SESSION_ROOT/controller.pid"
+CONTROLLER_READY_WAIT_SECONDS="${DYYPHOLDEM_UI_CONTROLLER_READY_WAIT_SECONDS:-420}"
 GUARD_SECONDS="${DYYPHOLDEM_UI_GUARD_SECONDS:-3600}"
 GPU_TYPE="${DYYPHOLDEM_GPU_TYPE:-NVIDIA GeForce RTX 4090}"
 CLOUD_TYPE="${DYYPHOLDEM_GPU_CLOUD_TYPE:-SECURE}"
@@ -443,6 +446,75 @@ remote_process_state() {
     "for role in dealer ui bot; do file=/root/dyypholdem/runs/play-ui/$RUN_NAME/\$role.pid; pid=\$([ -s \"\$file\" ] && tr -cd '0-9' < \"\$file\"); if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then printf '%s=running ' \"\$role\"; else printf '%s=dead ' \"\$role\"; fi; done; echo"
 }
 
+controller_state() {
+  controller_pid=""
+  [ -s "$CONTROLLER_PID_FILE" ] && controller_pid="$(tr -cd '0-9' < "$CONTROLLER_PID_FILE")"
+  if [ -n "$controller_pid" ] && kill -0 "$controller_pid" 2>/dev/null; then
+    printf '%s %s\n' "$controller_pid" running
+  elif [ -n "$controller_pid" ]; then
+    printf '%s %s\n' "$controller_pid" exited
+  else
+    printf '%s %s\n' "-" absent
+  fi
+}
+
+start_detached_controller() {
+  validate_uint DYYPHOLDEM_UI_CONTROLLER_READY_WAIT_SECONDS \
+    "$CONTROLLER_READY_WAIT_SECONDS" 1 900
+  mkdir -p "$SESSION_ROOT"
+
+  read -r previous_pid previous_state < <(controller_state)
+  if [ "$previous_state" = running ]; then
+    echo "a DyypHoldem UI controller is already running (pid $previous_pid)" >&2
+    return 1
+  fi
+
+  umask 077
+  : > "$CONTROLLER_LOG"
+  nohup "$PROJECT_DIR/scripts/run_play_ui.sh" controller \
+    >"$CONTROLLER_LOG" 2>&1 < /dev/null &
+  controller_pid=$!
+  printf '%s\n' "$controller_pid" > "$CONTROLLER_PID_FILE"
+  chmod 600 "$CONTROLLER_LOG" "$CONTROLLER_PID_FILE"
+  printf 'PLAY_UI_CONTROLLER_PID=%s\nPLAY_UI_CONTROLLER_LOG=%s\n' \
+    "$controller_pid" "$CONTROLLER_LOG"
+
+  deadline=$(( $(date +%s) + CONTROLLER_READY_WAIT_SECONDS ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if [ -s "$CURRENT_MANIFEST" ]; then
+      manifest_pid="$(json_field "$CURRENT_MANIFEST" launcher_pid)"
+      manifest_status="$(json_field "$CURRENT_MANIFEST" status)"
+      if [ "$manifest_pid" = "$controller_pid" ]; then
+        case "$manifest_status" in
+          running)
+            printf 'PLAY_UI_READY\nPLAY_UI_URL=%s\nLOCAL_RUN_DIR=%s\nHARD_STOP_EPOCH=%s\n' \
+              "$(json_field "$CURRENT_MANIFEST" authenticated_url)" \
+              "$(json_field "$CURRENT_MANIFEST" local_run_dir)" \
+              "$(json_field "$CURRENT_MANIFEST" absolute_stop_epoch)"
+            return 0
+            ;;
+          terminated|terminated_*)
+            echo "detached DyypHoldem UI controller terminated during setup" >&2
+            tail -80 "$CONTROLLER_LOG" >&2 || true
+            return 1
+            ;;
+        esac
+      fi
+    fi
+    if ! kill -0 "$controller_pid" 2>/dev/null; then
+      wait "$controller_pid" 2>/dev/null || controller_rc=$?
+      controller_rc="${controller_rc:-1}"
+      echo "detached DyypHoldem UI controller exited during setup (status $controller_rc)" >&2
+      tail -80 "$CONTROLLER_LOG" >&2 || true
+      return "$controller_rc"
+    fi
+    sleep 2
+  done
+
+  echo "controller is still setting up; it remains detached" >&2
+  echo "follow progress with: tail -f $CONTROLLER_LOG" >&2
+}
+
 if [ "$COMMAND" = "dry-run" ]; then
   validate_config
   printf '%s\n' \
@@ -452,6 +524,7 @@ if [ "$COMMAND" = "dry-run" ]; then
     "  solver: real ACPC dealer + ContinualResolving, 1,000 CFR iterations" \
     "  models: four checksum-verified compact recovered networks" \
     "  telemetry: private JSONL plus safe live/final per-street reports" \
+    "  controller: detached locally; start waits up to $CONTROLLER_READY_WAIT_SECONDS seconds for PLAY_UI_READY" \
     "  hard guard: $GUARD_SECONDS seconds; authenticated remote retry-delete plus independent local stop/delete watchdog" \
     "  shutdown: quiesce, retry final copyback, exact-name stop/delete, six successful absence checks"
   exit 0
@@ -459,6 +532,9 @@ fi
 
 if [ "$COMMAND" = "status" ] || [ "$COMMAND" = "logs" ] || [ "$COMMAND" = "stop" ]; then
   load_manifest_session
+  read -r saved_controller_pid saved_controller_state < <(controller_state)
+  printf 'controllerPid=%s\ncontrollerState=%s\ncontrollerLog=%s\n' \
+    "$saved_controller_pid" "$saved_controller_state" "$CONTROLLER_LOG"
   if [ "$COMMAND" = "logs" ]; then
     if [ "$REMOTE_READY" = 1 ]; then
       copy_back_once || { echo "could not refresh logs from the live pod" >&2; exit 1; }
@@ -481,7 +557,12 @@ if [ "$COMMAND" = "status" ] || [ "$COMMAND" = "logs" ] || [ "$COMMAND" = "stop"
   exit 1
 fi
 
-[ "$COMMAND" = "start" ] || { usage >&2; exit 2; }
+if [ "$COMMAND" = "start" ]; then
+  start_detached_controller
+  exit $?
+fi
+
+[ "$COMMAND" = "controller" ] || { usage >&2; exit 2; }
 validate_config
 verify_models
 verify_play_ui_bundle
