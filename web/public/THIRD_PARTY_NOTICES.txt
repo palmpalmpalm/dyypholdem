@@ -1,12 +1,9 @@
-# Third-party notices
+THIRD-PARTY NOTICES
 
-## Pip Web
+[Pip Web]
 
-The action-sizing interaction in this frontend was inspired by the MIT-licensed
-[Pip Web](https://github.com/playpip/pip-web) `ActionBar` component: a primary
-Bet/Raise button opens a focused size chooser with a range control and common
-pot-size presets. The implementation here was rewritten for DyypHoldem's
-server-authoritative ACPC state and does not include Pip's engine or store.
+The action-sizing interaction in this frontend was inspired by the
+MIT-licensed Pip Web project: https://github.com/playpip/pip-web
 
 MIT License
 
@@ -30,14 +27,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Elite-Poker
+[Elite-Poker]
 
 The casino-table presentation, seat treatment, chip-stack styling, and primary
-action grouping were adapted from the MIT-licensed
-[Elite-Poker](https://github.com/opadips/Elite-Poker) project. DyypHoldem keeps
-its own React state, server-authoritative ACPC protocol, PokerKit legality,
-privacy controls, and action-submission code; Elite-Poker's game server and
-network protocol are not included.
+action grouping were adapted from the MIT-licensed Elite-Poker project:
+https://github.com/opadips/Elite-Poker
 
 MIT License
 

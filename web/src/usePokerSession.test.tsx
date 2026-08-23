@@ -13,6 +13,35 @@ function deferred<T>() {
 }
 
 describe('poker session refresh ordering', () => {
+  it('commits authoritative state and completes actions without waiting for diagnostics', async () => {
+    const slowReport = deferred<ReturnType<typeof emptyReport>>()
+    const api: PokerApi = {
+      getState: vi
+        .fn()
+        .mockResolvedValueOnce(pokerState({ stateNonce: 42 }))
+        .mockResolvedValueOnce(pokerState({ stateNonce: 43, status: 'bot_thinking' })),
+      getReport: vi.fn().mockReturnValue(slowReport.promise),
+      submitAction: vi.fn().mockResolvedValue(undefined),
+    }
+    const view = renderHook(() => usePokerSession(api))
+
+    await waitFor(() => expect(view.result.current.state?.stateNonce).toBe(42))
+    expect(view.result.current.report).toBeNull()
+
+    let accepted = false
+    await act(async () => {
+      accepted = await view.result.current.submitAction({ actionId: 'call', stateNonce: 42 })
+    })
+    expect(accepted).toBe(true)
+    expect(view.result.current.state?.stateNonce).toBe(43)
+    expect(view.result.current.busy).toBe(false)
+    expect(view.result.current.report).toBeNull()
+
+    await act(async () => slowReport.resolve(emptyReport()))
+    await waitFor(() => expect(view.result.current.report).not.toBeNull())
+    view.unmount()
+  })
+
   it('does not let an older overlapping refresh restore stale state', async () => {
     const older = deferred<PokerState>()
     const newer = deferred<PokerState>()

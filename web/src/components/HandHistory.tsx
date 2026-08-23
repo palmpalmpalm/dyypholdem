@@ -4,7 +4,7 @@ import { Card } from './Card'
 
 export function HandHistory({ hands }: { hands: HandResult[] }) {
   return (
-    <details className="side-section history-section" open>
+    <details className="side-section history-section">
       <summary>
         <span>Hand history</span>
         <span className="summary-count">{hands.length}</span>

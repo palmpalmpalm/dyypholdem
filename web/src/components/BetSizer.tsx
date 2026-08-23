@@ -77,14 +77,13 @@ export function BetSizer({
   }
 
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section
-        className="bet-sizer"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="bet-sizer-title"
-        aria-describedby="bet-sizer-help"
-      >
+    <section
+      className="bet-sizer"
+      role="dialog"
+      aria-modal="false"
+      aria-labelledby="bet-sizer-title"
+      aria-describedby="bet-sizer-help"
+    >
         <header className="sizer-header">
           <div>
             <span className="eyebrow">Choose a total</span>
@@ -201,7 +200,6 @@ export function BetSizer({
         <button className="confirm-raise" type="button" disabled={!legal || busy} onClick={submit}>
           {busy ? 'Sending…' : `${verb} to ${formatChips(raiseTo)}`}
         </button>
-      </section>
-    </div>
+    </section>
   )
 }

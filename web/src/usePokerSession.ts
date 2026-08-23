@@ -23,14 +23,37 @@ export function usePokerSession(injectedApi?: PokerApi) {
   const [notice, setNotice] = useState<SessionNotice | null>(null)
   const stateRef = useRef<PokerState | null>(null)
   const latestRefreshRef = useRef(0)
+  const reportInFlightRef = useRef(false)
+  const lastReportStartedAtRef = useRef(0)
 
   const refresh = useCallback(
-    async (signal?: AbortSignal) => {
+    async (signal?: AbortSignal, includeReport = true) => {
       const refreshId = ++latestRefreshRef.current
-      const [stateResult, reportResult] = await Promise.allSettled([
-        api.getState(signal),
-        api.getReport(signal),
-      ])
+      const now = Date.now()
+      if (
+        includeReport &&
+        !reportInFlightRef.current &&
+        now - lastReportStartedAtRef.current >= 4_000
+      ) {
+        reportInFlightRef.current = true
+        lastReportStartedAtRef.current = now
+        void api
+          .getReport(signal)
+          .then((nextReport) => {
+            if (!signal?.aborted) setReport(nextReport)
+          })
+          .catch(() => {
+            // Solver diagnostics never block or downgrade the live table state.
+          })
+          .finally(() => {
+            reportInFlightRef.current = false
+          })
+      }
+
+      const stateResult = await api.getState(signal).then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason: unknown) => ({ status: 'rejected' as const, reason }),
+      )
       // A polling request and a post-action refresh can overlap. Only the
       // newest request may update the table or restore an older state nonce.
       if (refreshId !== latestRefreshRef.current) return
@@ -38,7 +61,7 @@ export function usePokerSession(injectedApi?: PokerApi) {
         stateRef.current = stateResult.value
         setState(stateResult.value)
         setConnected(true)
-      } else if (stateResult.reason?.name !== 'AbortError') {
+      } else if (!(stateResult.reason instanceof Error && stateResult.reason.name === 'AbortError')) {
         setConnected(false)
         const reason = stateResult.reason
         const message =
@@ -47,7 +70,6 @@ export function usePokerSession(injectedApi?: PokerApi) {
             : 'Connection interrupted. Retrying…'
         setNotice((current) => current?.tone === 'error' ? current : { tone: 'error', message })
       }
-      if (reportResult.status === 'fulfilled') setReport(reportResult.value)
       setLoading(false)
     },
     [api],
@@ -79,13 +101,13 @@ export function usePokerSession(injectedApi?: PokerApi) {
     async (submission: ActionSubmission): Promise<boolean> => {
       if (!stateRef.current || stateRef.current.stateNonce !== submission.stateNonce) {
         setNotice({ tone: 'info', message: 'The table changed. Refreshed before sending your action.' })
-        await refresh()
+        await refresh(undefined, false)
         return false
       }
       setBusy(true)
       try {
         await api.submitAction(submission)
-        await refresh()
+        await refresh(undefined, false)
         return true
       } catch (error) {
         if (error instanceof StaleActionError) {
@@ -95,7 +117,7 @@ export function usePokerSession(injectedApi?: PokerApi) {
         } else {
           setNotice({ tone: 'error', message: 'The action could not be sent. Please try again.' })
         }
-        await refresh()
+        await refresh(undefined, false)
         return false
       } finally {
         setBusy(false)
