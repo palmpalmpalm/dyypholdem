@@ -136,6 +136,43 @@ def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object
         ),
     }
 
+    captured_chance = [
+        item for item in decisions if item.get("chance_captured_flop") is True
+    ]
+    replayed_chance = [
+        item for item in decisions if item.get("chance_replayed_flop") is True
+    ]
+    unclassified_chance = [
+        item
+        for item in decisions
+        if float(item.get("chance_reconstruction_seconds", 0.0)) > 0
+        and item.get("chance_captured_flop") is not True
+        and item.get("chance_replayed_flop") is not True
+    ]
+    chance_reconstruction = {
+        "captured_flop": {
+            "count": len(captured_chance),
+            "timing_seconds": summarize_values(
+                item.get("chance_reconstruction_seconds", 0.0)
+                for item in captured_chance
+            ),
+        },
+        "replayed_flop": {
+            "count": len(replayed_chance),
+            "timing_seconds": summarize_values(
+                item.get("chance_reconstruction_seconds", 0.0)
+                for item in replayed_chance
+            ),
+        },
+        "unclassified": {
+            "count": len(unclassified_chance),
+            "timing_seconds": summarize_values(
+                item.get("chance_reconstruction_seconds", 0.0)
+                for item in unclassified_chance
+            ),
+        },
+    }
+
     completed_hand_numbers = {
         hand_number
         for item in hand_results
@@ -157,6 +194,11 @@ def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object
                 "cfr_iterations": item.get("cfr_iterations"),
                 "total_response_seconds": item.get("total_response_seconds"),
                 "cfr_seconds": item.get("cfr_seconds"),
+                "chance_reconstruction_seconds": item.get(
+                    "chance_reconstruction_seconds"
+                ),
+                "chance_captured_flop": item.get("chance_captured_flop"),
+                "chance_replayed_flop": item.get("chance_replayed_flop"),
                 "peak_cuda_allocated_bytes": item.get("peak_cuda_allocated_bytes"),
             }
         )
@@ -174,6 +216,7 @@ def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object
         },
         "by_street": by_street,
         "preflop_solve_modes": preflop_modes,
+        "chance_reconstruction": chance_reconstruction,
         "recent_decisions": recent,
     }
 
@@ -209,6 +252,15 @@ def render_text_report(report: dict[str, object]) -> str:
         lines.append(
             f"- {mode}: n={data['decisions']}, response mean={total['mean']:.6f}, "
             f"p50={total['p50']:.6f}, p95={total['p95']:.6f}, max={total['max']:.6f}"
+        )
+    lines.extend(["", "Preflop-to-flop chance reconstruction (seconds)"])
+    for mode in ("captured_flop", "replayed_flop", "unclassified"):
+        data = report["chance_reconstruction"][mode]
+        timing = data["timing_seconds"]
+        lines.append(
+            f"- {mode}: n={data['count']}, total={timing['total']:.6f}, "
+            f"mean={timing['mean']:.6f}, p95={timing['p95']:.6f}, "
+            f"max={timing['max']:.6f}"
         )
     return "\n".join(lines) + "\n"
 
