@@ -1,4 +1,9 @@
 import math
+import os
+import threading
+from collections import OrderedDict
+from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.nn
@@ -10,6 +15,42 @@ import settings.constants as constants
 import nn.bucketer as bucketer
 from nn.value_nn import ValueNn
 import game.card_tools as card_tools
+
+
+@dataclass(frozen=True)
+class _BucketingTransform:
+    street: int
+    bucket_count: int
+    board_count: int
+    range_matrix: torch.Tensor
+    reverse_value_matrix: torch.Tensor
+
+    @property
+    def bytes(self):
+        return sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (self.range_matrix, self.reverse_value_matrix)
+        )
+
+
+# The matrices are immutable after construction but very large. One recent
+# public board is enough to accelerate repeated decisions within a hand while
+# keeping retained CPU/VRAM bounded (flop -> turn is about 496 MiB).
+_BUCKETING_TRANSFORM_CACHE = OrderedDict()
+_BUCKETING_TRANSFORM_CACHE_LOCK = threading.Lock()
+_DEFAULT_BUCKETING_TRANSFORM_CACHE_BYTES = 600 * 1024 * 1024
+
+
+def _bucketing_transform_cache_limit():
+    raw_limit = os.environ.get("DYYPHOLDEM_NRV_CACHE_BYTES")
+    if raw_limit is None:
+        return _DEFAULT_BUCKETING_TRANSFORM_CACHE_BYTES
+    try:
+        return max(0, int(raw_limit))
+    except ValueError:
+        # A malformed explicit cap must fail closed instead of unexpectedly
+        # retaining a half-gigabyte transform.
+        return 0
 
 
 class NextRoundValue(object):
@@ -37,8 +78,29 @@ class NextRoundValue(object):
 
     def __init__(self, nn, board, nrv=None):
         self.nn = nn
+        self.bucketing_cache_hit = False
+        self.bucketing_transform_bytes = 0
         if nrv is None:
-            self._init_bucketing(board)
+            cache_key = self._bucketing_transform_cache_key(board)
+            transform = self._get_cached_bucketing_transform(cache_key)
+            if transform is None:
+                # Keep only the most recent public board. Removing the cache's
+                # reference before a large miss also lowers peak memory when
+                # the previous resolver is no longer live.
+                self._clear_bucketing_transform_cache()
+                self._init_bucketing(board)
+                transform = _BucketingTransform(
+                    street=self._street,
+                    bucket_count=self.bucket_count,
+                    board_count=self.board_count,
+                    range_matrix=self._range_matrix,
+                    reverse_value_matrix=self._reverse_value_matrix,
+                )
+                self._cache_bucketing_transform(cache_key, transform)
+            else:
+                self.bucketing_cache_hit = True
+                self._use_bucketing_transform(transform)
+            self.bucketing_transform_bytes = transform.bytes
         else:
             self._street = nrv._street
             self.bucket_count = nrv.bucket_count
@@ -46,6 +108,72 @@ class NextRoundValue(object):
             self._range_matrix = nrv._range_matrix.clone()
             self._range_matrix_board_view = self._range_matrix.view(game_settings.hand_count, self.board_count, self.bucket_count)
             self._reverse_value_matrix = nrv._reverse_value_matrix.clone()
+            self.bucketing_transform_bytes = sum(
+                tensor.numel() * tensor.element_size()
+                for tensor in (
+                    self._range_matrix,
+                    self._reverse_value_matrix,
+                )
+            )
+
+    @staticmethod
+    def _bucketing_transform_cache_key(board):
+        prototype = arguments.Tensor()
+        board_values = tuple(
+            int(value) for value in board.detach().cpu().view(-1).tolist()
+        )
+        street = card_tools.board_to_street(board)
+        return (
+            board_values,
+            street,
+            bucketer.get_bucket_count(street + 1),
+            game_settings.card_count,
+            game_settings.hand_card_count,
+            game_settings.hand_count,
+            tuple(game_settings.board_card_count),
+            bool(arguments.use_sqlite),
+            str(Path.cwd().resolve()),
+            str(prototype.device),
+            str(prototype.dtype),
+            id(bucketer.compute_buckets),
+        )
+
+    @staticmethod
+    def _get_cached_bucketing_transform(cache_key):
+        with _BUCKETING_TRANSFORM_CACHE_LOCK:
+            transform = _BUCKETING_TRANSFORM_CACHE.pop(cache_key, None)
+            if (
+                transform is not None
+                and transform.bytes <= _bucketing_transform_cache_limit()
+            ):
+                _BUCKETING_TRANSFORM_CACHE[cache_key] = transform
+                return transform
+            return None
+
+    @staticmethod
+    def _cache_bucketing_transform(cache_key, transform):
+        if transform.bytes > _bucketing_transform_cache_limit():
+            return
+        with _BUCKETING_TRANSFORM_CACHE_LOCK:
+            _BUCKETING_TRANSFORM_CACHE.clear()
+            _BUCKETING_TRANSFORM_CACHE[cache_key] = transform
+
+    @staticmethod
+    def _clear_bucketing_transform_cache():
+        with _BUCKETING_TRANSFORM_CACHE_LOCK:
+            _BUCKETING_TRANSFORM_CACHE.clear()
+
+    def _use_bucketing_transform(self, transform):
+        self._street = transform.street
+        self.bucket_count = transform.bucket_count
+        self.board_count = transform.board_count
+        self._range_matrix = transform.range_matrix
+        self._range_matrix_board_view = self._range_matrix.view(
+            game_settings.hand_count,
+            self.board_count,
+            self.bucket_count,
+        )
+        self._reverse_value_matrix = transform.reverse_value_matrix
 
     # --- Initializes the tensor that translates hand ranges to bucket ranges.
     # -- @local

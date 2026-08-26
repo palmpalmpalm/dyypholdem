@@ -173,6 +173,48 @@ def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object
         },
     }
 
+    bucketing_cache_events = [
+        item
+        for item in decisions
+        if item.get("bucketing_cache_hit") is True
+        or item.get("bucketing_cache_hit") is False
+    ]
+    bucketing_cache_hits = [
+        item
+        for item in bucketing_cache_events
+        if item.get("bucketing_cache_hit") is True
+    ]
+    bucketing_cache_misses = [
+        item
+        for item in bucketing_cache_events
+        if item.get("bucketing_cache_hit") is False
+    ]
+    postflop_bucketing_cache = {
+        "eligible_decisions": len(bucketing_cache_events),
+        "hits": len(bucketing_cache_hits),
+        "misses": len(bucketing_cache_misses),
+        "hit_rate": (
+            len(bucketing_cache_hits) / len(bucketing_cache_events)
+            if bucketing_cache_events
+            else 0.0
+        ),
+        "hit_lookahead_build_seconds": summarize_values(
+            item.get("lookahead_build_seconds", 0.0)
+            for item in bucketing_cache_hits
+        ),
+        "miss_lookahead_build_seconds": summarize_values(
+            item.get("lookahead_build_seconds", 0.0)
+            for item in bucketing_cache_misses
+        ),
+        "max_transform_bytes": max(
+            (
+                int(item.get("bucketing_transform_bytes", 0))
+                for item in bucketing_cache_events
+            ),
+            default=0,
+        ),
+    }
+
     completed_hand_numbers = {
         hand_number
         for item in hand_results
@@ -199,6 +241,10 @@ def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object
                 ),
                 "chance_captured_flop": item.get("chance_captured_flop"),
                 "chance_replayed_flop": item.get("chance_replayed_flop"),
+                "bucketing_cache_hit": item.get("bucketing_cache_hit"),
+                "bucketing_transform_bytes": item.get(
+                    "bucketing_transform_bytes"
+                ),
                 "peak_cuda_allocated_bytes": item.get("peak_cuda_allocated_bytes"),
             }
         )
@@ -217,6 +263,7 @@ def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object
         "by_street": by_street,
         "preflop_solve_modes": preflop_modes,
         "chance_reconstruction": chance_reconstruction,
+        "postflop_bucketing_cache": postflop_bucketing_cache,
         "recent_decisions": recent,
     }
 
@@ -262,6 +309,18 @@ def render_text_report(report: dict[str, object]) -> str:
             f"mean={timing['mean']:.6f}, p95={timing['p95']:.6f}, "
             f"max={timing['max']:.6f}"
         )
+    cache = report["postflop_bucketing_cache"]
+    lines.extend(
+        [
+            "",
+            "Postflop bucketing-transform cache",
+            f"- eligible={cache['eligible_decisions']}, hits={cache['hits']}, "
+            f"misses={cache['misses']}, hit rate={cache['hit_rate']:.3f}",
+            f"- hit build mean={cache['hit_lookahead_build_seconds']['mean']:.6f}s, "
+            f"miss build mean={cache['miss_lookahead_build_seconds']['mean']:.6f}s, "
+            f"max transform bytes={cache['max_transform_bytes']}",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 

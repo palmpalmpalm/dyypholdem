@@ -174,6 +174,26 @@ asking for more speed.
 
 ## Verified Initial Result
 
+Postflop resolves now retain one immutable board-specific bucketing transform
+for reuse by another decision on the same public board. The forward and reverse
+matrices are shared, while iteration counters, pot inputs, normalization
+buffers, and counterfactual-value memory remain private to each resolver. The
+cache defaults to a strict `629145600`-byte limit (600 MiB); set
+`DYYPHOLDEM_NRV_CACHE_BYTES=0` to disable it. Live decision telemetry reports
+hits, misses, hit rate, build timing, and retained transform size. The current
+ACPC/UI runtime resolves serially on PyTorch's default CUDA stream; concurrent
+or custom-stream serving would require a single-flight build and explicit CUDA
+publication synchronization before enabling this cache there.
+
+On the fixed `flop-3cAdKc` CPU fixture, a warm same-board resolve reduced median
+two-iteration wall time from `0.5427 s` to `0.0836 s` (`6.50x`) by reducing
+lookahead construction from roughly `0.46 s` to `0.0015 s`. All strategy and
+CFV tensors remained bit-identical. This setup-heavy diagnostic is not a claim
+of a 5.96x production solve speedup at 1,000 iterations. Retrospective analysis
+of the earlier 100-hand RTX 4090 log found 21 same-board postflop decisions and
+`18.0785 s` of repeated lookahead-build time that this cache is designed to
+avoid; a new live GPU run is still required to measure the realized saving.
+
 The first real CPU gate compared commit `0f13fd4` with the current buffer-reuse
 candidate using the same 1,000 iterations, one warmup, and three measured
 repeats:

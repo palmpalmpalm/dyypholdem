@@ -183,6 +183,10 @@ class ContinualResolving(object):
             "chance_reconstruction_seconds": phase_timing.get("chance_reconstruction_seconds", 0.0),
             "chance_replayed_flop": phase_timing.get("chance_replayed_flop", False),
             "chance_captured_flop": phase_timing.get("chance_captured_flop", False),
+            "bucketing_cache_hit": phase_timing.get("bucketing_cache_hit"),
+            "bucketing_transform_bytes": phase_timing.get(
+                "bucketing_transform_bytes", 0
+            ),
             "terminal_equity_seconds": phase_timing.get("terminal_equity_seconds", 0.0),
             "public_tree_seconds": phase_timing.get("public_tree_seconds", 0.0),
             "lookahead_tensor_seconds": phase_timing.get("lookahead_tensor_seconds", 0.0),
@@ -224,6 +228,8 @@ class ContinualResolving(object):
                 "chance_reconstruction_seconds": 0.0,
                 "chance_replayed_flop": False,
                 "chance_captured_flop": False,
+                "bucketing_cache_hit": None,
+                "bucketing_transform_bytes": 0,
                 "terminal_equity_seconds": 0.0,
                 "public_tree_seconds": 0.0,
                 "lookahead_tensor_seconds": 0.0,

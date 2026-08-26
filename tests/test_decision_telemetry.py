@@ -20,8 +20,8 @@ class DecisionTelemetryTest(unittest.TestCase):
     def test_report_groups_timings_by_street_without_private_strategy(self):
         events = [
             {"event": "initialization", "seconds": 7.5, "root_resolve": {"cfr_seconds": 6.0}},
-            {"event": "decision", "street": "flop", "total_response_seconds": 3, "cfr_seconds": 2, "chance_reconstruction_seconds": 1.5, "chance_captured_flop": True, "strategy": [{"probability": 1.0}]},
-            {"event": "decision", "street": "flop", "total_response_seconds": 5, "cfr_seconds": 4, "chance_reconstruction_seconds": 2.5, "chance_replayed_flop": True, "chosen_action": "call"},
+            {"event": "decision", "street": "flop", "total_response_seconds": 3, "cfr_seconds": 2, "chance_reconstruction_seconds": 1.5, "chance_captured_flop": True, "bucketing_cache_hit": False, "bucketing_transform_bytes": 100, "lookahead_build_seconds": 0.4, "strategy": [{"probability": 1.0}]},
+            {"event": "decision", "street": "flop", "total_response_seconds": 5, "cfr_seconds": 4, "chance_reconstruction_seconds": 2.5, "chance_replayed_flop": True, "bucketing_cache_hit": True, "bucketing_transform_bytes": 100, "lookahead_build_seconds": 0.01, "chosen_action": "call"},
             {"event": "decision", "street": "river", "total_response_seconds": 1, "cfr_seconds": 0.5},
             {"event": "hand_result", "hand_number": "0", "winnings": 150, "cumulative_winnings": 150},
             {"event": "hand_result", "hand_number": 1, "winnings": -50, "cumulative_winnings": 100},
@@ -38,6 +38,13 @@ class DecisionTelemetryTest(unittest.TestCase):
             1.5,
         )
         self.assertEqual(report["chance_reconstruction"]["unclassified"]["count"], 0)
+        self.assertEqual(report["postflop_bucketing_cache"]["hits"], 1)
+        self.assertEqual(report["postflop_bucketing_cache"]["misses"], 1)
+        self.assertEqual(report["postflop_bucketing_cache"]["hit_rate"], 0.5)
+        self.assertEqual(
+            report["postflop_bucketing_cache"]["max_transform_bytes"],
+            100,
+        )
         self.assertNotIn("strategy", report["recent_decisions"][0])
         self.assertEqual(report["match"]["hands_completed"], 2)
         self.assertEqual(report["match"]["cumulative_winnings"], 100)
@@ -76,6 +83,7 @@ class DecisionTelemetryTest(unittest.TestCase):
             self.assertIn("Hands completed: 1", (root / "report.txt").read_text())
             self.assertIn("Bot winnings: 125 chips", (root / "report.txt").read_text())
             self.assertIn("captured_flop: n=0", (root / "report.txt").read_text())
+            self.assertIn("Postflop bucketing-transform cache", (root / "report.txt").read_text())
 
 
 if __name__ == "__main__":

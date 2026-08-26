@@ -3,6 +3,7 @@
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest import mock
+import os
 import sys
 import unittest
 
@@ -28,6 +29,7 @@ arguments.Tensor = torch.FloatTensor
 arguments.LongTensor = torch.LongTensor
 arguments.device = torch.device("cpu")
 
+import nn.next_round_value as next_round_value_module  # noqa: E402
 import nn.next_round_value_pre as next_round_value_pre_module  # noqa: E402
 from nn.next_round_value import NextRoundValue  # noqa: E402
 from nn.next_round_value_pre import NextRoundValuePre  # noqa: E402
@@ -181,6 +183,185 @@ class CfrIterationBufferReuseTest(unittest.TestCase):
 
 
 class NextRoundValueBufferReuseTest(unittest.TestCase):
+    def tearDown(self):
+        NextRoundValue._clear_bucketing_transform_cache()
+
+    def test_invalid_explicit_cache_limit_fails_closed(self):
+        with mock.patch.dict(
+            os.environ,
+            {"DYYPHOLDEM_NRV_CACHE_BYTES": "not-a-byte-count"},
+        ):
+            self.assertEqual(
+                next_round_value_module._bucketing_transform_cache_limit(),
+                0,
+            )
+
+    def test_same_board_shares_only_immutable_bucketing_transform(self):
+        calls = []
+
+        class IdentityValueNet:
+            @staticmethod
+            def get_value(inputs, output):
+                output.copy_(inputs[:, 0:-1])
+
+        def initialize(instance, _board):
+            calls.append(instance)
+            instance._street = 2
+            instance.bucket_count = 3
+            instance.board_count = 2
+            instance._range_matrix = torch.arange(
+                24, dtype=torch.float32
+            ).view(4, 6)
+            instance._range_matrix_board_view = (
+                instance._range_matrix.view(4, 2, 3)
+            )
+            instance._reverse_value_matrix = (
+                instance._range_matrix.t().clone().mul_(0.25)
+            )
+
+        board = torch.tensor([1.0, 2.0, 3.0])
+        with (
+            mock.patch.object(
+                NextRoundValue,
+                "_bucketing_transform_cache_key",
+                return_value=("same-board",),
+            ),
+            mock.patch.object(
+                NextRoundValue,
+                "_init_bucketing",
+                autospec=True,
+                side_effect=initialize,
+            ),
+            mock.patch.object(game_settings, "hand_count", 4),
+        ):
+            first = NextRoundValue(IdentityValueNet(), board)
+            second = NextRoundValue(IdentityValueNet(), board)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            first._range_matrix.data_ptr(),
+            second._range_matrix.data_ptr(),
+        )
+        self.assertEqual(
+            first._reverse_value_matrix.data_ptr(),
+            second._reverse_value_matrix.data_ptr(),
+        )
+
+        transform_before = first._range_matrix.clone()
+        source = torch.ones(1, 4)
+        first_output = first._card_range_to_bucket_range(source)
+        second_output = second._card_range_to_bucket_range(source)
+        self.assertTrue(torch.equal(first_output, second_output))
+        self.assertTrue(torch.equal(first._range_matrix, transform_before))
+
+        bucket_values = torch.arange(6, dtype=torch.float32).view(1, 6)
+        first_cards = first._bucket_value_to_card_value(bucket_values)
+        second_cards = second._bucket_value_to_card_value(bucket_values)
+        self.assertTrue(torch.equal(first_cards, second_cards))
+        self.assertTrue(torch.equal(first._range_matrix, transform_before))
+
+        with (
+            mock.patch.object(game_settings, "hand_count", 4),
+            mock.patch.object(arguments, "Tensor", torch.FloatTensor),
+        ):
+            first.start_computation(torch.tensor([100.0]), 1)
+            second.start_computation(torch.tensor([300.0]), 1)
+            self.assertNotEqual(
+                first.pot_sizes.data_ptr(), second.pot_sizes.data_ptr()
+            )
+            first.pot_sizes.fill_(999)
+            self.assertTrue(
+                torch.equal(second.pot_sizes, torch.tensor([[300.0]]))
+            )
+
+            ranges = torch.tensor(
+                [[[0.1, 0.2, 0.3, 0.4], [0.4, 0.3, 0.2, 0.1]]]
+            )
+            first_values = torch.empty_like(ranges)
+            second_values = torch.empty_like(ranges)
+            first.get_value(ranges, first_values)
+            second.get_value(ranges, second_values)
+            self.assertTrue(torch.equal(first_values, second_values))
+            self.assertNotEqual(
+                first.next_round_inputs.data_ptr(),
+                second.next_round_inputs.data_ptr(),
+            )
+            self.assertTrue(torch.equal(first._range_matrix, transform_before))
+
+    def test_lowered_byte_limit_evicts_existing_transform(self):
+        calls = []
+
+        def initialize(instance, _board):
+            calls.append(instance)
+            instance._street = 2
+            instance.bucket_count = 1
+            instance.board_count = 1
+            instance._range_matrix = torch.ones(1, 1)
+            instance._range_matrix_board_view = (
+                instance._range_matrix.view(1, 1, 1)
+            )
+            instance._reverse_value_matrix = torch.ones(1, 1)
+
+        board = torch.tensor([1.0, 2.0, 3.0])
+        with (
+            mock.patch.object(
+                NextRoundValue,
+                "_bucketing_transform_cache_key",
+                return_value=("uncached",),
+            ),
+            mock.patch.object(
+                NextRoundValue,
+                "_init_bucketing",
+                autospec=True,
+                side_effect=initialize,
+            ),
+        ):
+            NextRoundValue(object(), board)
+            with mock.patch.object(
+                next_round_value_module,
+                "_bucketing_transform_cache_limit",
+                return_value=0,
+            ):
+                NextRoundValue(object(), board)
+
+        self.assertEqual(len(calls), 2)
+
+    def test_cache_key_separates_board_dtype_and_backend(self):
+        first_board = torch.tensor([1.0, 2.0, 3.0])
+        second_board = torch.tensor([1.0, 2.0, 4.0])
+        with (
+            mock.patch.object(
+                next_round_value_module.card_tools,
+                "board_to_street",
+                return_value=2,
+            ),
+            mock.patch.object(
+                next_round_value_module.bucketer,
+                "get_bucket_count",
+                return_value=1000,
+            ),
+            mock.patch.object(arguments, "use_sqlite", False),
+            mock.patch.object(arguments, "Tensor", torch.FloatTensor),
+        ):
+            first_key = NextRoundValue._bucketing_transform_cache_key(
+                first_board
+            )
+            second_key = NextRoundValue._bucketing_transform_cache_key(
+                second_board
+            )
+            with mock.patch.object(arguments, "Tensor", torch.DoubleTensor):
+                double_key = NextRoundValue._bucketing_transform_cache_key(
+                    first_board
+                )
+            with mock.patch.object(arguments, "use_sqlite", True):
+                sqlite_key = NextRoundValue._bucketing_transform_cache_key(
+                    first_board
+                )
+
+        self.assertNotEqual(first_key, second_key)
+        self.assertNotEqual(first_key, double_key)
+        self.assertNotEqual(first_key, sqlite_key)
+
     def test_matrix_transforms_write_into_caller_storage(self):
         calculator = NextRoundValue.__new__(NextRoundValue)
         calculator._range_matrix = torch.tensor(

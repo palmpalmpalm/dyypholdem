@@ -49,6 +49,16 @@ class Resolving(object):
         build_tree_params = BuildTreeParams(root_node=node, limit_to_street=True)
         self.lookahead_tree = self.tree_builder.build_tree(build_tree_params)
 
+    def _bucketing_cache_telemetry(self):
+        transition_box = getattr(self.lookahead, "next_street_boxes", None)
+        cache_hit = getattr(transition_box, "bucketing_cache_hit", None)
+        return {
+            "bucketing_cache_hit": cache_hit,
+            "bucketing_transform_bytes": int(
+                getattr(transition_box, "bucketing_transform_bytes", 0)
+            ),
+        }
+
     # -- Re-solves a depth-limited lookahead using input ranges.
     # --
     # -- Uses the input range for the opponent instead of a gadget range, so only
@@ -102,6 +112,7 @@ class Resolving(object):
             "cfr_seconds": cfr_seconds,
             "results_seconds": results_seconds,
             "resolve_total_seconds": self._elapsed(total_started),
+            **self._bucketing_cache_telemetry(),
         }
 
         return self.resolve_results
@@ -155,6 +166,7 @@ class Resolving(object):
             "cfr_seconds": cfr_seconds,
             "results_seconds": results_seconds,
             "resolve_total_seconds": self._elapsed(total_started),
+            **self._bucketing_cache_telemetry(),
         }
         return self.resolve_results
 
