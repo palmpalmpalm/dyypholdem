@@ -64,8 +64,10 @@ class NextRoundValuePre(object):
         self.board_indexes_scatter = self.board_buckets.clone()
         self.board_indexes_scatter.masked_fill_(self.impossible_mask, self.bucket_count + 1)
 
-        self.board_indexes = self.board_indexes.long()
-        self.board_indexes_scatter = self.board_indexes_scatter.long()
+        # Keep the immutable lookup indexes zero-based so the hot CFR path can
+        # expand views directly instead of cloning and subtracting every iteration.
+        self.board_indexes = self.board_indexes.long().sub_(1)
+        self.board_indexes_scatter = self.board_indexes_scatter.long().sub_(1)
 
         arguments.timer.stop(message="Pre-flop buckets initialized in", log_level="LOADING")
 
@@ -111,7 +113,9 @@ class NextRoundValuePre(object):
             self.next_round_values = arguments.Tensor(self.batch_size, constants.players_count, self.bucket_count_aux).zero_()
             self.next_round_extended_range = arguments.Tensor(self.batch_size, constants.players_count, self.bucket_count_aux).zero_()
             self.next_round_serialized_range = self.next_round_extended_range.view(-1, self.bucket_count_aux)
-            self.range_normalization = arguments.Tensor()
+            self.range_normalization = arguments.Tensor(
+                self.batch_size * constants.players_count
+            )
             self.value_normalization = arguments.Tensor(self.batch_size, constants.players_count)
 
             # handling pot feature for the nn
@@ -127,7 +131,9 @@ class NextRoundValuePre(object):
         if use_memory and self.iter == arguments.cfr_skip_iters + 1:
             # first iter that we need to remember something - we need to init data structures
             self.bucket_range_on_board = arguments.Tensor(self.batch_size * constants.players_count, self.bucket_count)
-            self.range_normalization_on_board = arguments.Tensor()
+            self.range_normalization_on_board = arguments.Tensor(
+                self.batch_size * constants.players_count
+            )
             self.value_normalization_on_board = arguments.Tensor(self.batch_size, constants.players_count)
             self.range_normalization_memory = arguments.Tensor(self.batch_size * constants.players_count, 1).zero_()
             self.counterfactual_value_memory = arguments.Tensor(self.batch_size, constants.players_count, self.bucket_count).zero_()
@@ -142,7 +148,11 @@ class NextRoundValuePre(object):
         self._card_range_to_bucket_range_aux(ranges.view(self.batch_size * constants.players_count, -1),
                                              self.next_round_extended_range.view(self.batch_size * constants.players_count, -1))
 
-        self.range_normalization = torch.sum(self.next_round_serialized_range[:, 0:self.bucket_count_aux], 1)
+        torch.sum(
+            self.next_round_serialized_range[:, 0:self.bucket_count_aux],
+            1,
+            out=self.range_normalization,
+        )
         rn_view = self.range_normalization.view(self.batch_size, constants.players_count)
         for player in range(constants.players_count):
             self.value_normalization[:, player].copy_(rn_view[:, 1 - player])
@@ -150,7 +160,11 @@ class NextRoundValuePre(object):
         if use_memory:
             self._card_range_to_bucket_range_on_board(next_board_idx, ranges.view(self.batch_size * constants.players_count, -1),
                                                       self.next_round_extended_range_on_board.view(self.batch_size * constants.players_count, -1))
-            self.range_normalization_on_board = torch.sum(self.next_round_serialized_range_on_board[:, 0:self.bucket_count], 1)
+            torch.sum(
+                self.next_round_serialized_range_on_board[:, 0:self.bucket_count],
+                1,
+                out=self.range_normalization_on_board,
+            )
             rnb_view = self.range_normalization_on_board.view(self.batch_size, constants.players_count)
             for player in range(constants.players_count):
                 self.value_normalization_on_board[:, player].copy_(rnb_view[:, 1 - player])
@@ -221,8 +235,15 @@ class NextRoundValuePre(object):
             self.transposed_next_round_values = arguments.Tensor(self.batch_size, constants.players_count, self.board_count, self.bucket_count)
             self.next_round_extended_range = arguments.Tensor(self.batch_size, constants.players_count, self.board_count, self.bucket_count + 1).zero_()
             self.next_round_serialized_range = self.next_round_extended_range.view(-1, self.bucket_count + 1)
-            self.range_normalization = arguments.Tensor()
+            self.range_normalization = arguments.Tensor(
+                self.batch_size * constants.players_count * self.board_count
+            )
             self.value_normalization = arguments.Tensor(self.batch_size, constants.players_count, self.board_count)
+            self.values_per_board = arguments.Tensor(
+                self.batch_size * constants.players_count,
+                self.board_count,
+                game_settings.hand_count,
+            )
 
             # handling pot feature for the nn
             assert self._street <= 3
@@ -237,7 +258,11 @@ class NextRoundValuePre(object):
         self._card_range_to_bucket_range(ranges.view(self.batch_size * constants.players_count, -1),
                                          self.next_round_extended_range.view(self.batch_size * constants.players_count, -1))
 
-        self.range_normalization = torch.sum(self.next_round_serialized_range[:, 0:self.bucket_count], 1)
+        torch.sum(
+            self.next_round_serialized_range[:, 0:self.bucket_count],
+            1,
+            out=self.range_normalization,
+        )
         rn_view = self.range_normalization.view(self.batch_size, constants.players_count, self.board_count)
         for player in range(constants.players_count):
             self.value_normalization[:, player, :].copy_(rn_view[:, 1 - player, :])
@@ -286,6 +311,191 @@ class NextRoundValuePre(object):
         self._bucket_value_to_card_value_on_board(board, self.counterfactual_value_memory.view(self.batch_size * constants.players_count, -1),
                                                   values.view(self.batch_size * constants.players_count, -1))
 
+    def get_value_on_board_from_trajectories(
+        self, board, trajectories, full_pot_sizes, action_indices
+    ):
+        """Evaluate captured averaging trajectories without replaying preflop CFR.
+
+        Only action-addressable ranges are retained, but neural inference keeps
+        the original full transition batch shape and row positions. Unmapped
+        rows are zero because value-network evaluation is row-independent.
+        """
+        assert trajectories.dim() == 5
+        iteration_count, action_count, batch_size, player_count, hand_count = (
+            trajectories.shape
+        )
+        assert iteration_count == arguments.cfr_iters - arguments.cfr_skip_iters
+        assert action_count == action_indices.numel()
+        assert player_count == constants.players_count
+        assert hand_count == game_settings.hand_count
+        assert full_pot_sizes.dim() == 1
+        assert action_indices.dim() == 1
+        assert action_indices.device == trajectories.device
+        assert full_pot_sizes.device == trajectories.device
+
+        full_pot_count = full_pot_sizes.numel()
+        assert int(action_indices.min().item()) >= 0
+        assert int(action_indices.max().item()) < full_pot_count
+
+        mapped_state_count = action_count * batch_size
+        full_state_count = full_pot_count * batch_size
+        device = trajectories.device
+
+        batch_offsets = torch.arange(
+            batch_size, dtype=torch.long, device=device
+        )
+        full_row_indices = (
+            action_indices.view(-1, 1) * batch_size + batch_offsets
+        ).reshape(-1)
+
+        mapped_extended_range = trajectories.new_zeros(
+            mapped_state_count,
+            constants.players_count,
+            self.bucket_count + 1,
+        )
+        mapped_serialized_range = mapped_extended_range.view(
+            -1, self.bucket_count + 1
+        )
+        range_normalization = trajectories.new_empty(
+            mapped_state_count * constants.players_count
+        )
+        value_normalization = trajectories.new_empty(
+            mapped_state_count, constants.players_count
+        )
+        range_normalization_memory = trajectories.new_zeros(
+            mapped_state_count * constants.players_count, 1
+        )
+        counterfactual_value_memory = trajectories.new_zeros(
+            mapped_state_count, constants.players_count, self.bucket_count
+        )
+
+        mapped_range_inputs = trajectories.new_empty(
+            mapped_state_count, self.bucket_count * constants.players_count
+        )
+        full_inputs = trajectories.new_zeros(
+            full_state_count,
+            self.bucket_count * constants.players_count + 1,
+        )
+        expanded_pot_sizes = (
+            full_pot_sizes.view(-1, 1)
+            .expand(full_pot_count, batch_size)
+            .reshape(-1)
+        )
+        full_inputs[:, -1].copy_(expanded_pot_sizes)
+        full_inputs[:, -1].mul_(float(1 / game_settings.stack))
+
+        full_values = trajectories.new_empty(
+            full_state_count, self.bucket_count * constants.players_count
+        )
+        mapped_serialized_values = trajectories.new_empty(
+            mapped_state_count, self.bucket_count * constants.players_count
+        )
+        mapped_values = mapped_serialized_values.view(
+            mapped_state_count, constants.players_count, self.bucket_count
+        )
+
+        board_idx = card_tools.get_flop_board_index(board)
+        for iteration in range(iteration_count):
+            ranges = trajectories[iteration].view(
+                mapped_state_count, constants.players_count, hand_count
+            )
+            self._card_range_to_bucket_range_on_board(
+                board_idx,
+                ranges.view(
+                    mapped_state_count * constants.players_count, hand_count
+                ),
+                mapped_extended_range.view(
+                    mapped_state_count * constants.players_count, -1
+                ),
+            )
+
+            torch.sum(
+                mapped_serialized_range[:, 0:self.bucket_count],
+                1,
+                out=range_normalization,
+            )
+            normalization_view = range_normalization.view(
+                mapped_state_count, constants.players_count
+            )
+            for player in range(constants.players_count):
+                value_normalization[:, player].copy_(
+                    normalization_view[:, 1 - player]
+                )
+            range_normalization_memory.add_(
+                value_normalization.view(range_normalization_memory.shape)
+            )
+
+            range_normalization[
+                torch.eq(range_normalization, 0)
+            ] = 1
+            mapped_serialized_range.div_(
+                range_normalization.view(-1, 1).expand_as(
+                    mapped_serialized_range
+                )
+            )
+            mapped_ranges_by_player = mapped_extended_range.view(
+                mapped_state_count,
+                constants.players_count,
+                self.bucket_count + 1,
+            )
+            for player in range(constants.players_count):
+                start = player * self.bucket_count
+                stop = (player + 1) * self.bucket_count
+                mapped_range_inputs[:, start:stop].copy_(
+                    mapped_ranges_by_player[
+                        :, player, 0:self.bucket_count
+                    ]
+                )
+            full_inputs[:, 0:-1].index_copy_(
+                0, full_row_indices, mapped_range_inputs
+            )
+
+            self.nn.get_value(full_inputs, full_values)
+            torch.index_select(
+                full_values,
+                0,
+                full_row_indices,
+                out=mapped_serialized_values,
+            )
+            mapped_values.mul_(
+                value_normalization.view(
+                    mapped_state_count, constants.players_count, 1
+                )
+            )
+            counterfactual_value_memory.add_(mapped_values)
+
+        range_normalization_memory[
+            torch.eq(range_normalization_memory, 0)
+        ] = 1
+        counterfactual_value_memory.view(
+            -1, self.bucket_count
+        ).div_(
+            range_normalization_memory.expand(
+                mapped_state_count * constants.players_count,
+                self.bucket_count,
+            )
+        )
+
+        card_values = trajectories.new_empty(
+            mapped_state_count, constants.players_count, hand_count
+        )
+        self._bucket_value_to_card_value_on_board(
+            board,
+            counterfactual_value_memory.view(
+                mapped_state_count * constants.players_count,
+                self.bucket_count,
+            ),
+            card_values.view(
+                mapped_state_count * constants.players_count, hand_count
+            ),
+        )
+        return card_values.view(
+            action_count,
+            batch_size,
+            constants.players_count,
+            hand_count,
+        )
+
     # -- Converts a range vector over private hands to a range vector over buckets.
     # -- @param card_range a probability vector over private hands
     # -- @param bucket_range a vector in which to store the output probabilities over buckets
@@ -293,7 +503,6 @@ class NextRoundValuePre(object):
     def _card_range_to_bucket_range(self, card_range, bucket_range):
         other_bucket_range = bucket_range.view(-1, self.board_count, self.bucket_count + 1).zero_()
         indexes = self.board_indexes_scatter.view(1, self.board_count, game_settings.hand_count).expand(bucket_range.size(0), self.board_count, game_settings.hand_count)
-        indexes = indexes.clone().sub_(1)  # subtract one as the buckets are 1-based indexed in the master file
         other_bucket_range.scatter_add_(2, indexes, card_range.view(-1, 1, game_settings.hand_count).expand(card_range.size(0), self.board_count, game_settings.hand_count))
 
     def _card_range_to_bucket_range_aux(self, card_range, bucket_range):
@@ -302,7 +511,6 @@ class NextRoundValuePre(object):
     def _card_range_to_bucket_range_on_board(self, board_idx, card_range, bucket_range):
         other_bucket_range = bucket_range.view(-1, self.bucket_count + 1).zero_()
         indexes = self.board_indexes_scatter.view(1, self.board_count, game_settings.hand_count)[:, board_idx, :].expand(bucket_range.size(0), game_settings.hand_count)
-        indexes = indexes.clone().sub_(1)  # subtract one as the buckets are 1-based indexed in the master file
         other_bucket_range.scatter_add_(1, indexes, card_range.view(-1, game_settings.hand_count).expand(card_range.size(0), game_settings.hand_count))
 
     # --- Converts a value vector over buckets to a value vector over private hands.
@@ -311,8 +519,14 @@ class NextRoundValuePre(object):
     # -- @local
     def _bucket_value_to_card_value(self, bucket_value, card_value):
         indexes = self.board_indexes.view(1, self.board_count, game_settings.hand_count).expand(bucket_value.size(0), self.board_count, game_settings.hand_count)
-        indexes = indexes.clone().sub_(1)  # subtract one as the buckets are 1-based indexed in the master file
-        self.values_per_board = bucket_value.view(bucket_value.size(0), self.board_count, self.bucket_count).gather(2, indexes)
+        torch.gather(
+            bucket_value.view(
+                bucket_value.size(0), self.board_count, self.bucket_count
+            ),
+            2,
+            indexes,
+            out=self.values_per_board,
+        )
         impossible = self.impossible_mask.view(1, self.board_count, game_settings.hand_count).expand(bucket_value.size(0), self.board_count, game_settings.hand_count)
         self.values_per_board.masked_fill_(impossible, 0)
         torch.sum(self.values_per_board, 1, out=card_value)
@@ -331,8 +545,7 @@ class NextRoundValuePre(object):
     def _bucket_value_to_card_value_on_board(self, board, bucket_value, card_value):
         board_idx = card_tools.get_flop_board_index(board)
         indexes = self.board_indexes.view(1, self.board_count, game_settings.hand_count)[:, board_idx, :].expand(bucket_value.size(0), game_settings.hand_count)
-        indexes = indexes.clone().sub_(1)  # subtract one as the buckets are 1-based indexed in the master file
-        self.values_per_board = bucket_value.view(bucket_value.size(0), self.bucket_count).gather(1, indexes)
+        values_on_board = bucket_value.view(bucket_value.size(0), self.bucket_count).gather(1, indexes)
         impossible = self.impossible_mask.view(1, self.board_count, game_settings.hand_count)[:, board_idx, :].expand(bucket_value.size(0), game_settings.hand_count)
-        self.values_per_board.masked_fill_(impossible, 0)
-        card_value.copy_(self.values_per_board)
+        values_on_board.masked_fill_(impossible, 0)
+        card_value.copy_(values_on_board)

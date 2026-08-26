@@ -65,7 +65,13 @@ class LookaheadBuilder(object):
     def reset(self):
         for d in range(1, self.lookahead.depth + 1):
             if d in self.lookahead.ranges_data and self.lookahead.ranges_data[d] is not None:
-                self.lookahead.ranges_data[d].fill_(1.0 / game_settings.hand_count)
+                # Match _construct_data_structures exactly. Only the root and
+                # its direct children start from the uniform placeholder range;
+                # deeper reach ranges are produced by the first CFR iteration.
+                initial_range = (
+                    1.0 / game_settings.hand_count if d <= 2 else 0
+                )
+                self.lookahead.ranges_data[d].fill_(initial_range)
             if d in self.lookahead.average_strategies_data and self.lookahead.average_strategies_data[d] is not None:
                 self.lookahead.average_strategies_data[d].fill_(0)
             if d in self.lookahead.current_strategy_data and self.lookahead.current_strategy_data[d] is not None:
@@ -75,11 +81,17 @@ class LookaheadBuilder(object):
             if d in self.lookahead.average_cfvs_data and self.lookahead.average_cfvs_data[d] is not None:
                 self.lookahead.average_cfvs_data[d].fill_(0)
             if d in self.lookahead.regrets_data and self.lookahead.regrets_data[d] is not None:
-                self.lookahead.regrets_data[d].fill_(0)
+                initial_regret = (
+                    0 if d <= 2 else self.lookahead.regret_epsilon
+                )
+                self.lookahead.regrets_data[d].fill_(initial_regret)
             if d in self.lookahead.current_regrets_data and self.lookahead.current_regrets_data[d] is not None:
                 self.lookahead.current_regrets_data[d].fill_(0)
             if d in self.lookahead.positive_regrets_data and self.lookahead.positive_regrets_data[d] is not None:
-                self.lookahead.positive_regrets_data[d].fill_(0)
+                initial_regret = (
+                    0 if d <= 2 else self.lookahead.regret_epsilon
+                )
+                self.lookahead.positive_regrets_data[d].fill_(initial_regret)
             if d in self.lookahead.placeholder_data and self.lookahead.placeholder_data[d] is not None:
                 self.lookahead.placeholder_data[d].fill_(0)
             if d in self.lookahead.regrets_sum and self.lookahead.regrets_sum[d] is not None:
@@ -92,8 +104,9 @@ class LookaheadBuilder(object):
                 self.lookahead.swap_data[d].fill_(0)
 
         if self.lookahead.next_street_boxes is not None:
-            self.lookahead.next_street_boxes.iter = 0
             self.lookahead.next_street_boxes.start_computation(self.lookahead.next_round_pot_sizes, self.lookahead.batch_size)
+            self.lookahead.next_street_boxes_inputs.zero_()
+            self.lookahead.next_street_boxes_outputs.zero_()
 
     # --- Computes the maximum number of actions at each depth of the tree.
     # --
@@ -402,26 +415,16 @@ class LookaheadBuilder(object):
         global aux_net
         global next_round_pre
 
-        # nothing to do if at the river
-        if self.lookahead.tree.street == constants.streets_count:
-            return
-
-        # load neural nets if not already loaded
-        nn = neural_net.get(self.lookahead.tree.street) or ValueNn().load_for_street(self.lookahead.tree.street)
-        neural_net[self.lookahead.tree.street] = nn
-        if self.lookahead.tree.street == 1:
-            aux_net = aux_net or ValueNn().load_for_street(self.lookahead.tree.street, True)
-
         self.lookahead.next_street_boxes = None
         self.lookahead.next_street_boxes_aux = None
         self.lookahead.indices = {}
         self.lookahead.num_pot_sizes = 0
 
-        if self.lookahead.tree.street == 1:
-            self.lookahead.next_street_boxes = next_round_pre or NextRoundValuePre(nn, aux_net, self.lookahead.terminal_equity.board)
-            next_round_pre = self.lookahead.next_street_boxes
-        else:
-            self.lookahead.next_street_boxes = NextRoundValue(nn, self.lookahead.terminal_equity.board)
+        # River and all-terminal trees have no depth-limited next-street states.
+        # Count those states before loading a value network or constructing the
+        # comparatively expensive bucketing transforms.
+        if self.lookahead.tree.street == constants.streets_count:
+            return
 
         # create the optimized data structures for batching next_round_value
         for d in range(2, self.lookahead.depth + 1):
@@ -440,6 +443,17 @@ class LookaheadBuilder(object):
 
         if self.lookahead.num_pot_sizes == 0:
             return
+
+        # Load the networks only after proving that this tree contains at least
+        # one transition leaf that needs a neural counterfactual value.
+        nn = neural_net.get(self.lookahead.tree.street) or ValueNn().load_for_street(self.lookahead.tree.street)
+        neural_net[self.lookahead.tree.street] = nn
+        if self.lookahead.tree.street == 1:
+            aux_net = aux_net or ValueNn().load_for_street(self.lookahead.tree.street, True)
+            self.lookahead.next_street_boxes = next_round_pre or NextRoundValuePre(nn, aux_net, self.lookahead.terminal_equity.board)
+            next_round_pre = self.lookahead.next_street_boxes
+        else:
+            self.lookahead.next_street_boxes = NextRoundValue(nn, self.lookahead.terminal_equity.board)
 
         self.lookahead.next_round_pot_sizes = arguments.Tensor(self.lookahead.num_pot_sizes).zero_()
 

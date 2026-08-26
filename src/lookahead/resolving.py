@@ -212,22 +212,34 @@ class Resolving(object):
     def get_chance_action_cfv(self, action, board):
         started = self._started()
         replayed_flop = False
+        captured_flop = False
         # resolve to get next_board chance actions if flop
         if board.dim() == 1 and board.size(0) == 3:
-            replayed_flop = True
-            self.lookahead.reset()
-            board_idx = card_tools.get_flop_board_index(board)
-            self.lookahead.next_board_idx = board_idx
+            captured_flop = (
+                self.lookahead.has_captured_preflop_inputs(action) is True
+            )
+            if not captured_flop:
+                replayed_flop = True
+                # The terminal-equity object is shared across hands and streets.
+                # A cached-root decision does not otherwise reset it, so a previous
+                # hand's board can leak into this preflop replay. Restore the board
+                # at which this lookahead was originally solved before recomputing
+                # its CFR trajectory for the observed flop.
+                self.terminal_equity.set_board(self.lookahead.tree.board)
+                self.lookahead.reset()
+                board_idx = card_tools.get_flop_board_index(board)
+                self.lookahead.next_board_idx = board_idx
 
-            if self.opponent_cfvs is not None:
-                self.lookahead.resolve(self.player_range, self.opponent_cfvs)
-            else:
-                self.lookahead.resolve_first_node(self.player_range, self.opponent_range)
-            self.lookahead.next_board_idx = None
+                if self.opponent_cfvs is not None:
+                    self.lookahead.resolve(self.player_range, self.opponent_cfvs)
+                else:
+                    self.lookahead.resolve_first_node(self.player_range, self.opponent_range)
+                self.lookahead.next_board_idx = None
         out = self.lookahead.get_chance_action_cfv(action, board)
         self.last_chance_timing = {
             "seconds": self._elapsed(started),
             "replayed_flop": replayed_flop,
+            "captured_flop": captured_flop,
         }
         return out
 

@@ -182,6 +182,7 @@ class ContinualResolving(object):
             "invariant_seconds": phase_timing.get("invariant_seconds", 0.0),
             "chance_reconstruction_seconds": phase_timing.get("chance_reconstruction_seconds", 0.0),
             "chance_replayed_flop": phase_timing.get("chance_replayed_flop", False),
+            "chance_captured_flop": phase_timing.get("chance_captured_flop", False),
             "terminal_equity_seconds": phase_timing.get("terminal_equity_seconds", 0.0),
             "public_tree_seconds": phase_timing.get("public_tree_seconds", 0.0),
             "lookahead_tensor_seconds": phase_timing.get("lookahead_tensor_seconds", 0.0),
@@ -222,6 +223,7 @@ class ContinualResolving(object):
                 "invariant_seconds": 0.0,
                 "chance_reconstruction_seconds": 0.0,
                 "chance_replayed_flop": False,
+                "chance_captured_flop": False,
                 "terminal_equity_seconds": 0.0,
                 "public_tree_seconds": 0.0,
                 "lookahead_tensor_seconds": 0.0,
@@ -262,6 +264,7 @@ class ContinualResolving(object):
                     "invariant_seconds": invariant_seconds,
                     "chance_reconstruction_seconds": chance_timing["seconds"],
                     "chance_replayed_flop": chance_timing["replayed_flop"],
+                    "chance_captured_flop": chance_timing["captured_flop"],
                     "terminal_equity_seconds": terminal_equity_seconds,
                 }
             )
@@ -277,7 +280,11 @@ class ContinualResolving(object):
     # -- (a table of the type returned by @{protocol_to_node.parse_state})
     # -- @local
     def _update_invariant(self, state, node):
-        chance_timing = {"seconds": 0.0, "replayed_flop": False}
+        chance_timing = {
+            "seconds": 0.0,
+            "replayed_flop": False,
+            "captured_flop": False,
+        }
         # 1.0 street has changed
         if self.last_node and self.last_node.street != node.street:
             assert self.last_node.street + 1 == node.street

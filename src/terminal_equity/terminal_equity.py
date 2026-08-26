@@ -33,9 +33,36 @@ class TerminalEquity(object):
     # --- Sets the board cards for the evaluator and creates its internal data structures.
     # -- @param board a possibly empty vector of board cards
     def set_board(self, board):
-        self.board = board
-        self._set_call_matrix(board)
-        self._set_fold_matrix(board)
+        current_board = getattr(self, "board", None)
+        if (
+            current_board is not None
+            and current_board.shape == board.shape
+            and current_board.device == board.device
+            and current_board.dtype == board.dtype
+            and torch.equal(current_board, board)
+        ):
+            return
+
+        # Keep an immutable value snapshot. Callers reuse and occasionally
+        # replace protocol tensors, so retaining their object directly would
+        # make a value-based cache vulnerable to later mutation.
+        candidate_board = board.clone()
+        previous_equity = getattr(self, "equity_matrix", None)
+        previous_fold = getattr(self, "fold_matrix", None)
+        try:
+            self._set_call_matrix(candidate_board)
+            self._set_fold_matrix(candidate_board)
+        except Exception:
+            if previous_equity is None:
+                self.__dict__.pop("equity_matrix", None)
+            else:
+                self.equity_matrix = previous_equity
+            if previous_fold is None:
+                self.__dict__.pop("fold_matrix", None)
+            else:
+                self.fold_matrix = previous_fold
+            raise
+        self.board = candidate_board
 
     # --- Computes (a batch of) counterfactual values that a player achieves at a terminal node
     # -- where no player has folded.
@@ -209,7 +236,5 @@ class TerminalEquity(object):
         self.fold_matrix.fill_(1)
         # setting cards that block each other to zero
         self._handle_blocking_cards(self.fold_matrix, board)
-
-
 
 

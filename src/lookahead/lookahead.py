@@ -1,4 +1,4 @@
-from typing import Dict, Union
+from typing import Dict, Optional, Union
 
 import torch
 
@@ -45,6 +45,8 @@ class Lookahead(object):
     positive_regrets_data: Dict[int, arguments.Tensor]
     placeholder_data: Dict[int, arguments.Tensor]
     regrets_sum: Dict[int, arguments.Tensor]
+    strategy_sum_data: Dict[int, arguments.Tensor]
+    cfvs_sum_data: Dict[int, arguments.Tensor]
     empty_action_mask: dict  # --used to mask empty actions
 
     action_to_index: dict
@@ -55,6 +57,10 @@ class Lookahead(object):
     next_street_boxes_outputs: torch.Tensor
     next_board_idx: int
     next_round_pot_sizes: torch.Tensor
+    preflop_next_street_inputs: Optional[torch.Tensor]
+    preflop_next_street_action_indices: Optional[torch.Tensor]
+    preflop_next_street_action_slots: dict
+    preflop_next_street_input_count: int
 
     term_call_indices: dict
     num_term_call_nodes: int
@@ -77,6 +83,12 @@ class Lookahead(object):
 
         self.reconstruction_opponent_cfvs = None
         self.next_board_idx = None
+        self.strategy_sum_data = {}
+        self.cfvs_sum_data = {}
+        self.preflop_next_street_inputs = None
+        self.preflop_next_street_action_indices = None
+        self.preflop_next_street_action_slots = {}
+        self.preflop_next_street_input_count = 0
 
     # --- Constructs the lookahead from a game's public tree.
     # --
@@ -84,9 +96,106 @@ class Lookahead(object):
     # -- @param tree a public tree
     def build_lookahead(self, tree):
         self.builder.build_from_tree(tree)
+        self._prepare_preflop_next_street_inputs()
 
     def reset(self):
         self.builder.reset()
+        self.preflop_next_street_input_count = 0
+
+    def _prepare_preflop_next_street_inputs(self):
+        """Reserve bounded, per-lookahead storage for flop-bound trajectories."""
+        self.preflop_next_street_inputs = None
+        self.preflop_next_street_action_indices = None
+        self.preflop_next_street_action_slots = {}
+        self.preflop_next_street_input_count = 0
+
+        if (
+            self.tree.street != 1
+            or self.next_street_boxes is None
+            or self.batch_size != 1
+        ):
+            return
+
+        action_rows = sorted(
+            self.action_to_index.items(), key=lambda item: item[1]
+        )
+        # The continual resolver can address at most call, the first raise, and
+        # all-in at the preflop root. Fall back to the legacy replay rather than
+        # allowing an unexpected tree to grow this persistent buffer unbounded.
+        if not action_rows or len(action_rows) > 3:
+            return
+
+        action_indices = [int(row) for _, row in action_rows]
+        if (
+            len(set(action_indices)) != len(action_indices)
+            or min(action_indices) < 0
+            or max(action_indices) >= self.num_pot_sizes
+        ):
+            return
+
+        averaging_iterations = arguments.cfr_iters - arguments.cfr_skip_iters
+        if averaging_iterations <= 0:
+            return
+
+        self.preflop_next_street_action_indices = torch.tensor(
+            action_indices,
+            dtype=torch.long,
+            device=self.next_street_boxes_inputs.device,
+        )
+        self.preflop_next_street_action_slots = {
+            action: slot for slot, (action, _) in enumerate(action_rows)
+        }
+        self.preflop_next_street_inputs = self.next_street_boxes_inputs.new_empty(
+            averaging_iterations,
+            len(action_rows),
+            self.batch_size,
+            constants.players_count,
+            game_settings.hand_count,
+        )
+
+    def _capture_preflop_next_street_inputs(self):
+        if (
+            self.preflop_next_street_inputs is None
+            or self.preflop_next_street_action_indices is None
+            or self.next_board_idx is not None
+            or self.next_street_boxes.iter < arguments.cfr_skip_iters
+        ):
+            return
+
+        capture_index = (
+            self.next_street_boxes.iter - arguments.cfr_skip_iters
+        )
+        if capture_index >= self.preflop_next_street_inputs.size(0):
+            return
+        if capture_index != self.preflop_next_street_input_count:
+            # A non-sequential solve cannot be reconstructed exactly; leave the
+            # capture incomplete so Resolving uses its corrected replay fallback.
+            return
+
+        torch.index_select(
+            self.next_street_boxes_inputs,
+            0,
+            self.preflop_next_street_action_indices,
+            out=self.preflop_next_street_inputs[capture_index],
+        )
+        self.preflop_next_street_input_count += 1
+
+    def has_captured_preflop_inputs(self, action) -> bool:
+        return bool(
+            self.preflop_next_street_inputs is not None
+            and self.preflop_next_street_action_indices is not None
+            and self.preflop_next_street_input_count
+            == self.preflop_next_street_inputs.size(0)
+            and action in self.preflop_next_street_action_slots
+        )
+
+    def get_preflop_capture_bytes(self) -> int:
+        if self.preflop_next_street_inputs is None:
+            return 0
+        return (
+            self.preflop_next_street_inputs.numel()
+            * self.preflop_next_street_inputs.element_size()
+        )
 
     # --- Re-solves the lookahead using input ranges.
     # --
@@ -196,6 +305,28 @@ class Lookahead(object):
     # -- @param board a tensor of board cards, updated by the chance event
     # -- @return a vector of cfvs
     def get_chance_action_cfv(self, action, board):
+        if board.dim() == 1 and board.size(0) == 3 and self.has_captured_preflop_inputs(action):
+            captured_outputs = (
+                self.next_street_boxes.get_value_on_board_from_trajectories(
+                    board,
+                    self.preflop_next_street_inputs,
+                    self.next_round_pot_sizes,
+                    self.preflop_next_street_action_indices,
+                )
+            )
+            capture_slot = self.preflop_next_street_action_slots[action]
+            pot_index = int(
+                self.preflop_next_street_action_indices[capture_slot].item()
+            )
+            # Board-specific memory is accumulated before the regular CFR
+            # output swap and get_value_on_board writes that raw ordering back.
+            # Match the legacy final selection directly for both actors.
+            out = captured_outputs[capture_slot, 0][
+                self.tree.current_player.value
+            ]
+            out.mul_(self.next_round_pot_sizes[pot_index])
+            return out
+
         box_outputs = self.next_street_boxes_outputs.view(-1, constants.players_count, game_settings.hand_count)
         next_street_box = self.next_street_boxes
         batch_index = self.action_to_index[action]
@@ -212,6 +343,8 @@ class Lookahead(object):
     # --- Re-solves the lookahead.
     # -- @local
     def _compute(self):
+        self._ensure_iteration_buffers()
+
         # 1.0 main loop
         for iteration in range(1, arguments.cfr_iters + 1):
             self._set_opponent_starting_range()
@@ -227,6 +360,29 @@ class Lookahead(object):
         self._compute_normalize_average_strategies()
         # 2.1 normalize root's CFVs
         self._compute_normalize_average_cfvs()
+
+    def _ensure_iteration_buffers(self):
+        """Allocate reduction outputs once instead of once per CFR iteration."""
+        for d in range(2, self.depth + 1):
+            strategy_source = self.positive_regrets_data[d]
+            strategy_buffer = self.strategy_sum_data.get(d)
+            if (
+                strategy_buffer is None
+                or strategy_buffer.shape != strategy_source.shape[1:]
+                or strategy_buffer.dtype != strategy_source.dtype
+                or strategy_buffer.device != strategy_source.device
+            ):
+                self.strategy_sum_data[d] = torch.empty_like(strategy_source[0])
+
+            cfvs_source = self.placeholder_data[d]
+            cfvs_buffer = self.cfvs_sum_data.get(d)
+            if (
+                cfvs_buffer is None
+                or cfvs_buffer.shape != cfvs_source.shape[1:]
+                or cfvs_buffer.dtype != cfvs_source.dtype
+                or cfvs_buffer.device != cfvs_source.device
+            ):
+                self.cfvs_sum_data[d] = torch.empty_like(cfvs_source[0])
 
     # --- Generates the opponent's range for the current re-solve iteration using
     # -- the @{cfrd_gadget|CFRDGadget}.
@@ -250,8 +406,13 @@ class Lookahead(object):
 
             # 1.1  regret matching
             # note that the regrets as well as the CFVs have switched player indexing
-            self.regrets_sum[d] = torch.sum(self.positive_regrets_data[d], 0)
-            self.current_strategy_data[d] = torch.div(self.positive_regrets_data[d], self.regrets_sum[d].expand_as(self.positive_regrets_data[d]))
+            strategy_sum = self.strategy_sum_data[d]
+            torch.sum(self.positive_regrets_data[d], 0, out=strategy_sum)
+            torch.div(
+                self.positive_regrets_data[d],
+                strategy_sum.expand_as(self.positive_regrets_data[d]),
+                out=self.current_strategy_data[d],
+            )
 
     # --- Using the players' current strategies, computes their probabilities of
     # -- reaching each state of the lookahead.
@@ -333,6 +494,7 @@ class Lookahead(object):
             self.next_street_boxes_inputs[:, :, 1, :].copy_(self.next_street_boxes_outputs[:, :, 0, :])
 
         if self.tree.street == 1:
+            self._capture_preflop_next_street_inputs()
             self.next_street_boxes.get_value_aux(self.next_street_boxes_inputs.view(-1, constants.players_count, game_settings.hand_count),
                                                  self.next_street_boxes_outputs.view(-1, constants.players_count, game_settings.hand_count), self.next_board_idx)
         else:
@@ -419,11 +581,12 @@ class Lookahead(object):
             # player indexing is swapped for cfvs
             self.placeholder_data[d][:, :, :, :, self.acting_player[d] - 1, :].mul_(self.current_strategy_data[d])
 
-            self.regrets_sum[d] = torch.sum(self.placeholder_data[d], 0)
+            cfvs_sum = self.cfvs_sum_data[d]
+            torch.sum(self.placeholder_data[d], 0, out=cfvs_sum)
 
             # use a swap placeholder to change {{1,2,3}, {4,5,6}} into {{1,2}, {3,4}, {5,6}}
             swap = self.swap_data[d - 1]
-            swap.copy_(self.regrets_sum[d].view(swap.shape))
+            swap.copy_(cfvs_sum.view(swap.shape))
 
             self.cfvs_data[d - 1][gp_layer_terminal_actions_count:, 0:ggp_layer_nonallin_bets_count, :, :, :, :].copy_(
                 swap.transpose(1, 2))
@@ -472,11 +635,10 @@ class Lookahead(object):
     # -- strategies, which are simpler to compute.
     # -- @local
     def _compute_normalize_average_strategies(self):
-        # using regrets_sum as a placeholder container
         player_avg_strategy = self.average_strategies_data[2]
-        player_avg_strategy_sum = self.regrets_sum[2]
+        player_avg_strategy_sum = self.strategy_sum_data[2]
 
-        player_avg_strategy_sum = torch.sum(player_avg_strategy, 0)
+        torch.sum(player_avg_strategy, 0, out=player_avg_strategy_sum)
         player_avg_strategy.div_(player_avg_strategy_sum.expand_as(player_avg_strategy))
 
         # if the strategy is 'empty' (zero reach), strategy does not matter but we need to make sure

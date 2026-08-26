@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Guarded live RTX 4090 session with periodic telemetry copyback.
+# Never allow inherited or command-line xtrace to echo credentials or session URLs.
+set +x
 set -euo pipefail
 
 COMMAND="${1:-start}"
@@ -95,10 +97,12 @@ validate_pod_identity() {
 }
 
 load_credentials() {
+  set +x 2>/dev/null || true
   [ -f "$ENV_FILE" ] || { echo "missing ignored RunPod credential file: $ENV_FILE" >&2; return 1; }
   set -a
   # shellcheck source=/dev/null
   source "$ENV_FILE"
+  set +x 2>/dev/null || true
   set +a
   [ -n "${RUNPOD_API_KEY:-}" ] || { echo "RUNPOD_API_KEY is missing from $ENV_FILE" >&2; return 1; }
 }
@@ -415,12 +419,18 @@ finalize_session() {
 }
 
 load_manifest_session() {
+  set +x 2>/dev/null || true
+  local authenticated_url_mode="${1:-load-authenticated-url}"
   [ -s "$CURRENT_MANIFEST" ] || { echo "no DyypHoldem UI session manifest" >&2; return 1; }
   POD_ID="$(json_field "$CURRENT_MANIFEST" pod_id)"
   POD_NAME="$(json_field "$CURRENT_MANIFEST" pod_name)"
   RUN_NAME="$(json_field "$CURRENT_MANIFEST" run_name)"
   PUBLIC_URL="$(json_field "$CURRENT_MANIFEST" public_url)"
-  AUTHENTICATED_URL="$(json_field "$CURRENT_MANIFEST" authenticated_url)"
+  if [ "$authenticated_url_mode" = "load-authenticated-url" ]; then
+    AUTHENTICATED_URL="$(json_field "$CURRENT_MANIFEST" authenticated_url)"
+  else
+    AUTHENTICATED_URL=""
+  fi
   COST_PER_HOUR="$(json_field "$CURRENT_MANIFEST" cost_per_hour)"
   LOCAL_RUN_DIR="$(json_field "$CURRENT_MANIFEST" local_run_dir)"
   SSH_CONFIG="$(json_field "$CURRENT_MANIFEST" ssh_config)"
@@ -570,7 +580,12 @@ if [ "$COMMAND" = "dry-run" ]; then
 fi
 
 if [ "$COMMAND" = "status" ] || [ "$COMMAND" = "logs" ] || [ "$COMMAND" = "stop" ]; then
-  load_manifest_session
+  if [ "$COMMAND" = "stop" ]; then
+    load_manifest_session load-authenticated-url
+  else
+    # Status and logs need only operational metadata; do not read the secret URL.
+    load_manifest_session omit-authenticated-url
+  fi
   read -r saved_controller_pid saved_controller_state < <(controller_state)
   printf 'controllerPid=%s\ncontrollerState=%s\ncontrollerLog=%s\n' \
     "$saved_controller_pid" "$saved_controller_state" "$CONTROLLER_LOG"
@@ -585,8 +600,8 @@ if [ "$COMMAND" = "status" ] || [ "$COMMAND" = "logs" ] || [ "$COMMAND" = "stop"
   load_credentials
   if [ "$COMMAND" = "status" ]; then
     "$LOCAL_PYTHON" "$POD_HELPER" exists --pod-id "$POD_ID"
-    printf 'authenticatedUrl=%s\nlocalRunDir=%s\ncopyStatus=%s\nlastSuccessfulCopyAt=%s\n' \
-      "$AUTHENTICATED_URL" "$LOCAL_RUN_DIR" "$COPY_STATUS" "$LAST_COPY_AT"
+    printf 'browserAccess=redacted\nlocalRunDir=%s\ncopyStatus=%s\nlastSuccessfulCopyAt=%s\n' \
+      "$LOCAL_RUN_DIR" "$COPY_STATUS" "$LAST_COPY_AT"
     exit 0
   fi
   if finalize_session user_stop; then

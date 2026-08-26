@@ -1,7 +1,12 @@
-.PHONY: test web-install web-test web-build model-recovery-progress recover-models compact-model-progress compact-models gpu-model-validation-dry-run gpu-model-validation gpu-baseline-dry-run gpu-baseline play-ui-dry-run play-ui play-ui-status play-ui-logs play-ui-stop random-benchmark-dry-run random-benchmark
+.PHONY: test web-install web-test web-build model-recovery-progress recover-models compact-model-progress compact-models gpu-model-validation-dry-run gpu-model-validation gpu-baseline-dry-run gpu-baseline play-ui-dry-run play-ui play-ui-status play-ui-logs play-ui-stop random-benchmark-dry-run random-benchmark solver-regression-preflight solver-regression-river solver-regression-compare
 
 PYTHON ?= /Users/palm/opt/miniconda3/bin/python3
 NPM ?= npm
+SOLVER_REGRESSION_SOURCE_ROOT ?= .
+SOLVER_REGRESSION_ASSET_ROOT ?= .
+SOLVER_REGRESSION_MODEL_ROOT ?= runs/model-recovery/compact
+SOLVER_REGRESSION_OUTPUT ?= runs/solver-regression/current-river.json
+SOLVER_REGRESSION_DEVICE ?= cpu
 
 test:
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
@@ -59,3 +64,30 @@ random-benchmark-dry-run: web-test web-build
 
 random-benchmark: web-test web-build
 	DYYPHOLDEM_UI_HANDS=100 DYYPHOLDEM_UI_OPPONENT=random ./scripts/run_play_ui.sh start
+
+solver-regression-preflight:
+	$(PYTHON) scripts/solver_regression.py preflight \
+		--source-root "$(SOLVER_REGRESSION_SOURCE_ROOT)" \
+		--asset-root "$(SOLVER_REGRESSION_ASSET_ROOT)" \
+		--model-root "$(SOLVER_REGRESSION_MODEL_ROOT)" \
+		--device "$(SOLVER_REGRESSION_DEVICE)" \
+		--spot river-7d7c8s5sQd
+
+solver-regression-river:
+	$(PYTHON) scripts/solver_regression.py capture \
+		--source-root "$(SOLVER_REGRESSION_SOURCE_ROOT)" \
+		--asset-root "$(SOLVER_REGRESSION_ASSET_ROOT)" \
+		--model-root "$(SOLVER_REGRESSION_MODEL_ROOT)" \
+		--device "$(SOLVER_REGRESSION_DEVICE)" \
+		--spot river-7d7c8s5sQd \
+		--iterations 1000 --warmups 1 --repeats 3 --threads 1 \
+		--output "$(SOLVER_REGRESSION_OUTPUT)"
+
+solver-regression-compare:
+	@test -n "$(SOLVER_REGRESSION_BASELINE)" || \
+		{ echo "set SOLVER_REGRESSION_BASELINE" >&2; exit 2; }
+	@test -n "$(SOLVER_REGRESSION_CANDIDATE)" || \
+		{ echo "set SOLVER_REGRESSION_CANDIDATE" >&2; exit 2; }
+	$(PYTHON) scripts/solver_regression.py compare \
+		--baseline "$(SOLVER_REGRESSION_BASELINE)" \
+		--candidate "$(SOLVER_REGRESSION_CANDIDATE)"

@@ -125,7 +125,9 @@ class NextRoundValue(object):
             self.transposed_next_round_values = arguments.Tensor(self.batch_size, constants.players_count, self.board_count, self.bucket_count)
             self.next_round_extended_range = arguments.Tensor(self.batch_size, constants.players_count, self.board_count * self.bucket_count ).zero_()
             self.next_round_serialized_range = self.next_round_extended_range.view(-1, self.bucket_count)
-            self.range_normalization = arguments.Tensor()
+            self.range_normalization = arguments.Tensor(
+                self.batch_size * constants.players_count * self.board_count
+            )
             self.value_normalization = arguments.Tensor(self.batch_size, constants.players_count, self.board_count)
 
             # handling pot feature for the nn
@@ -144,9 +146,18 @@ class NextRoundValue(object):
             self.counterfactual_value_memory = arguments.Tensor(self.batch_size, constants.players_count, self.board_count, self.bucket_count).zero_()
 
         # computing bucket range in next street for both players at once
-        self.next_round_extended_range.view(self.batch_size * constants.players_count, -1).copy_(self._card_range_to_bucket_range(ranges.view(self.batch_size * constants.players_count, -1)))
+        self._card_range_to_bucket_range(
+            ranges.view(self.batch_size * constants.players_count, -1),
+            self.next_round_extended_range.view(
+                self.batch_size * constants.players_count, -1
+            ),
+        )
 
-        self.range_normalization = torch.sum(self.next_round_serialized_range, 1)
+        torch.sum(
+            self.next_round_serialized_range,
+            1,
+            out=self.range_normalization,
+        )
         rn_view = self.range_normalization.view(self.batch_size, constants.players_count, self.board_count)
         for player in range(0, constants.players_count):
             self.value_normalization[:, player, :].copy_(rn_view[:, 1 - player, :])
@@ -182,7 +193,12 @@ class NextRoundValue(object):
             self.counterfactual_value_memory.add_(self.transposed_next_round_values)
 
         # translating bucket values back to the card values
-        values.view(self.batch_size * constants.players_count, -1).copy_(self._bucket_value_to_card_value(self.transposed_next_round_values.view(self.batch_size * constants.players_count, -1)))
+        self._bucket_value_to_card_value(
+            self.transposed_next_round_values.view(
+                self.batch_size * constants.players_count, -1
+            ),
+            values.view(self.batch_size * constants.players_count, -1),
+        )
 
     # --- Gives the average counterfactual values on the given board across previous
     # -- calls to @{get_value}.
@@ -223,7 +239,9 @@ class NextRoundValue(object):
     # --  over buckets
     # -- @local
     def _card_range_to_bucket_range(self, card_range, bucket_range=None):
-        return torch.mm(card_range, self._range_matrix)
+        if bucket_range is None:
+            return torch.mm(card_range, self._range_matrix)
+        return torch.mm(card_range, self._range_matrix, out=bucket_range)
 
     # --- Converts a value vector over buckets to a value vector over private hands.
     # -- @param bucket_value a value vector over buckets
@@ -232,7 +250,9 @@ class NextRoundValue(object):
     #
     # -- @local
     def _bucket_value_to_card_value(self, bucket_value, card_value=None):
-        return torch.mm(bucket_value, self._reverse_value_matrix)
+        if card_value is None:
+            return torch.mm(bucket_value, self._reverse_value_matrix)
+        return torch.mm(bucket_value, self._reverse_value_matrix, out=card_value)
 
     # --- Converts a value vector over buckets to a value vector over private hands
     # -- given a particular set of board cards.

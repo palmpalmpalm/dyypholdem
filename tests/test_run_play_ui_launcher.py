@@ -4,6 +4,7 @@ from pathlib import Path
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -97,6 +98,80 @@ sleep 30
                         os.kill(controller_pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+
+    def test_status_redacts_authenticated_url_and_credentials_under_xtrace(self):
+        secret_token = "status-secret-token-must-not-appear"
+        secret_api_key = "runpod-secret-key-must-not-appear"
+        authenticated_url = f"https://example.invalid/?token={secret_token}"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script_dir = root / "scripts"
+            session_root = root / "runs" / "play-ui"
+            local_run_dir = session_root / "status-test-run"
+            script_dir.mkdir()
+            local_run_dir.mkdir(parents=True)
+
+            launcher = script_dir / "run_play_ui.sh"
+            launcher.write_text(LAUNCHER.read_text())
+            launcher.chmod(0o755)
+
+            pod_helper = script_dir / "runpod_ui_pod.py"
+            pod_helper.write_text(
+                "import json\n"
+                "print(json.dumps({'exists': False, 'id': 'statuspod123'}))\n"
+            )
+
+            credential_file = root / ".env.local"
+            credential_file.write_text(f"RUNPOD_API_KEY={secret_api_key}\n")
+
+            python_wrapper = root / "python-wrapper"
+            python_wrapper.write_text(
+                f"#!{sys.executable}\n"
+                "import os\n"
+                "import sys\n"
+                "if sys.argv[-1:] == ['authenticated_url']:\n"
+                "    raise SystemExit('status attempted to read authenticated_url')\n"
+                f"os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n"
+            )
+            python_wrapper.chmod(0o755)
+
+            manifest = {
+                "status": "terminated",
+                "pod_id": "statuspod123",
+                "pod_name": "dyypholdem-ui-status-test",
+                "run_name": "status-test-run",
+                "public_url": "https://example.invalid",
+                "authenticated_url": authenticated_url,
+                "cost_per_hour": "0.74",
+                "local_run_dir": str(local_run_dir),
+                "ssh_config": str(local_run_dir / "missing-ssh-config"),
+                "absolute_stop_epoch": 4102444800,
+                "session_deadline_epoch": 4102444700,
+                "watchdog_pid": None,
+                "copy_status": "succeeded",
+                "last_successful_copy_at": "2026-08-23T21:22:15+00:00",
+            }
+            (session_root / "current.json").write_text(json.dumps(manifest) + "\n")
+
+            env = os.environ.copy()
+            env["DYYPHOLDEM_ENV_FILE"] = str(credential_file)
+            env["LOCAL_PYTHON"] = str(python_wrapper)
+            result = subprocess.run(
+                ["bash", "-x", str(launcher), "status"],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            combined_output = result.stdout + result.stderr
+            self.assertIn("browserAccess=redacted", result.stdout)
+            self.assertIn(f"localRunDir={local_run_dir}", result.stdout)
+            self.assertNotIn("authenticatedUrl=", combined_output)
+            self.assertNotIn(authenticated_url, combined_output)
+            self.assertNotIn(secret_token, combined_output)
+            self.assertNotIn(secret_api_key, combined_output)
 
 
 if __name__ == "__main__":
