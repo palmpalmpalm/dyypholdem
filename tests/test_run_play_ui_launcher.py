@@ -25,6 +25,20 @@ class RunPlayUiLauncherTests(unittest.TestCase):
 
         self.assertIn("controller: detached locally", result.stdout)
         self.assertIn("hard guard: 3600 seconds", result.stdout)
+        self.assertIn("GPU regression: 1", result.stdout)
+
+    def test_dry_run_can_disable_gpu_regression_explicitly(self):
+        env = os.environ.copy()
+        env["DYYPHOLDEM_UI_GPU_REGRESSION"] = "0"
+        result = subprocess.run(
+            [str(LAUNCHER), "dry-run"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertIn("GPU regression: 0", result.stdout)
 
     def test_start_detaches_controller_and_waits_for_its_manifest(self):
         source = LAUNCHER.read_text()

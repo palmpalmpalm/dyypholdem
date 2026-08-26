@@ -23,6 +23,7 @@ HANDS="${DYYPHOLDEM_UI_HANDS:-100}"
 SEED="${DYYPHOLDEM_UI_SEED:-20260823}"
 OPPONENT="${DYYPHOLDEM_UI_OPPONENT:-human}"
 OPPONENT_SEED="${DYYPHOLDEM_UI_OPPONENT_SEED:-20260824}"
+GPU_REGRESSION="${DYYPHOLDEM_UI_GPU_REGRESSION:-1}"
 MODEL_ROOT="${DYYPHOLDEM_COMPACT_MODEL_PATH:-$PROJECT_DIR/runs/model-recovery/compact}"
 HTTP_PORT=8000
 FINALIZE_MARGIN_SECONDS=90
@@ -84,6 +85,10 @@ validate_config() {
     echo "DYYPHOLDEM_UI_OPPONENT must be human or random" >&2
     return 1
   }
+  [ "$GPU_REGRESSION" = 0 ] || [ "$GPU_REGRESSION" = 1 ] || {
+    echo "DYYPHOLDEM_UI_GPU_REGRESSION must be 0 or 1" >&2
+    return 1
+  }
   [ "$CLOUD_TYPE" = "SECURE" ] || [ "$CLOUD_TYPE" = "COMMUNITY" ] || {
     echo "DYYPHOLDEM_GPU_CLOUD_TYPE must be SECURE or COMMUNITY" >&2
     return 1
@@ -116,6 +121,10 @@ verify_models() {
 verify_play_ui_bundle() {
   [ -s "$PROJECT_DIR/requirements-play-ui.txt" ] || {
     echo "missing play UI Python requirements" >&2
+    return 1
+  }
+  [ -s "$PROJECT_DIR/scripts/solver_regression.py" ] || {
+    echo "missing strict solver regression harness" >&2
     return 1
   }
   [ -s "$PROJECT_DIR/web/dist/index.html" ] || {
@@ -573,6 +582,7 @@ if [ "$COMMAND" = "dry-run" ]; then
     "  opponent: $OPPONENT${OPPONENT_SEED:+ (seed $OPPONENT_SEED)}" \
     "  models: four checksum-verified compact recovered networks" \
     "  telemetry: private JSONL plus safe live/final per-street reports" \
+    "  GPU regression: $GPU_REGRESSION (strict preflop root/chance tensors before UI start)" \
     "  controller: detached locally; start waits up to $CONTROLLER_READY_WAIT_SECONDS seconds for PLAY_UI_READY" \
     "  hard guard: $GUARD_SECONDS seconds; authenticated remote retry-delete plus independent local stop/delete watchdog" \
     "  shutdown: quiesce, retry final copyback, exact-name stop/delete, six successful absence checks"
@@ -779,6 +789,12 @@ echo "downloading and checksum-verifying full play assets"
 "${SSH[@]}" dyyui "cd /root/dyypholdem && timeout 1800s python3 scripts/materialize_assets.py --profile play > runs/play-ui/$RUN_NAME/play-assets.json"
 echo "validating recovered networks on CUDA"
 "${SSH[@]}" dyyui "cd /root/dyypholdem && timeout 600s python3 scripts/model_gpu_validation.py --model-root runs/model-recovery/compact --repeats 2 --source-commit $(git -C "$PROJECT_DIR" rev-parse HEAD) --output runs/play-ui/$RUN_NAME/model-validation.json > runs/play-ui/$RUN_NAME/model-validation.log 2>&1"
+
+if [ "$GPU_REGRESSION" = 1 ]; then
+  echo "running strict CUDA preflop/chance regression"
+  "${SSH[@]}" dyyui "cd /root/dyypholdem && timeout 900s python3 scripts/solver_regression.py capture --device cuda --spot preflop-root --iterations 1000 --skip-iterations 500 --warmups 1 --repeats 3 --threads 1 --output runs/play-ui/$RUN_NAME/solver-regression-cuda.json > runs/play-ui/$RUN_NAME/solver-regression-cuda.log 2>&1"
+  "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 -c 'import json; p=json.load(open(\"runs/play-ui/$RUN_NAME/solver-regression-cuda.json\")); s=p[\"spots\"][0]; rows=[a for b in s[\"chance_action_cfvs\"][\"boards\"] for a in b[\"actions\"]]; assert s[\"timing\"][\"max_repeat_tensor_delta\"] == 0; assert len(rows) == 6; assert all(a[\"timing\"][\"solver\"].get(\"captured_flop\") is True and a[\"timing\"][\"solver\"].get(\"replayed_flop\") is False for a in rows)'"
+fi
 
 echo "starting dealer, authenticated UI, and real continual resolver"
 "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD); cd /root/dyypholdem && ./scripts/start_play_ui_remote.sh '$RUN_NAME' '$HANDS' '$SEED' /root/dyypholdem/session-token '$OPPONENT' '$OPPONENT_SEED'"
