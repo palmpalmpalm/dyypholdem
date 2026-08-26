@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 import sys
 import unittest
@@ -14,6 +14,8 @@ SOURCE_DIR = PROJECT_DIR / "src"
 sys.path.insert(0, str(SOURCE_DIR))
 
 import settings.arguments as arguments  # noqa: E402
+import settings.constants as constants  # noqa: E402
+import settings.game_settings as game_settings  # noqa: E402
 
 _ARGUMENT_DEVICE_STATE = (
     arguments.use_gpu,
@@ -119,6 +121,63 @@ class CfrIterationBufferReuseTest(unittest.TestCase):
         lookahead.cfvs_data[2].copy_(source_cfvs)
         lookahead._compute_cfvs()
         self.assertEqual(lookahead.cfvs_sum_data[2].data_ptr(), sum_pointer)
+
+    def test_fold_terminal_negates_only_the_acting_player(self):
+        class TerminalEquityStub:
+            @staticmethod
+            def call_value(_ranges, result):
+                result.copy_(
+                    torch.tensor([[5.0, 6.0], [7.0, 8.0]])
+                )
+
+            @staticmethod
+            def fold_value(_ranges, result):
+                result.copy_(
+                    torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+                )
+
+        for acting_player, expected_fold in (
+            (1, [[-1.0, -2.0], [3.0, 4.0]]),
+            (2, [[1.0, 2.0], [-3.0, -4.0]]),
+        ):
+            with self.subTest(acting_player=acting_player), mock.patch.object(
+                game_settings, "hand_count", 2
+            ):
+                lookahead = Lookahead.__new__(Lookahead)
+                lookahead.depth = 2
+                lookahead.tree = SimpleNamespace(
+                    street=constants.streets_count
+                )
+                lookahead.first_call_terminal = True
+                lookahead.acting_player = {2: acting_player}
+                lookahead.term_call_indices = {2: [0, 1]}
+                lookahead.term_fold_indices = {2: [0, 1]}
+                lookahead.ranges_data = {
+                    2: torch.ones(2, 1, 1, 1, 2, 2)
+                }
+                lookahead.ranges_data_call = torch.empty(1, 1, 2, 2)
+                lookahead.ranges_data_fold = torch.empty(1, 1, 2, 2)
+                lookahead.cfvs_data_call = torch.empty(1, 1, 2, 2)
+                lookahead.cfvs_data_fold = torch.empty(1, 1, 2, 2)
+                lookahead.cfvs_data = {
+                    2: torch.empty(2, 1, 1, 1, 2, 2)
+                }
+                lookahead.terminal_equity = TerminalEquityStub()
+
+                lookahead._compute_terminal_equities_terminal_equity()
+
+                self.assertTrue(
+                    torch.equal(
+                        lookahead.cfvs_data[2][0, 0, 0, 0],
+                        torch.tensor(expected_fold),
+                    )
+                )
+                self.assertTrue(
+                    torch.equal(
+                        lookahead.cfvs_data[2][1, 0, 0, 0],
+                        torch.tensor([[5.0, 6.0], [7.0, 8.0]]),
+                    )
+                )
 
 
 class NextRoundValueBufferReuseTest(unittest.TestCase):

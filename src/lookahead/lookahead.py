@@ -560,10 +560,12 @@ class Lookahead(object):
             self.cfvs_data[d][0].copy_(
                 self.cfvs_data_fold[fold_indices[0]:fold_indices[1]].view(self.cfvs_data[d][0].shape))
 
-            # correctly set the folded player by multiplying by -1
-            fold_multiplier = (self.acting_player[d] * 2 - 3)
-            self.cfvs_data[d][0, :, :, :, 0, :].mul_(fold_multiplier)
-            self.cfvs_data[d][0, :, :, :, 1, :].mul_(-fold_multiplier)
+            # Fold values are positive for the winner. Only the player acting
+            # at this depth can take the fold action, so negate that plane and
+            # leave the winner untouched instead of launching a second no-op
+            # multiplication by +1.
+            folded_player = self.acting_player[d] - 1
+            self.cfvs_data[d][0, :, :, :, folded_player, :].neg_()
 
     # --- Using the players' reach probabilities and terminal counterfactual
     # -- values, computes their cfvs at all states of the lookahead.
