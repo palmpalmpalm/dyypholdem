@@ -192,7 +192,53 @@ CFV tensors remained bit-identical. This setup-heavy diagnostic is not a claim
 of a 5.96x production solve speedup at 1,000 iterations. Retrospective analysis
 of the earlier 100-hand RTX 4090 log found 21 same-board postflop decisions and
 `18.0785 s` of repeated lookahead-build time that this cache is designed to
-avoid; a new live GPU run is still required to measure the realized saving.
+avoid. The live validation below measures the realized cache and trajectory
+capture behavior.
+
+### 2026-08-27 Live RTX 4090 Validation
+
+Commit `659e69b` passed the fail-closed CUDA gate on a Secure RTX 4090 with
+PyTorch `2.8.0+cu128`: three measured 1000/500-iteration preflop root solves
+were bit-identical (`max_repeat_tensor_delta=0`), and all six chance probes
+across two boards and three actions used captured trajectories with no replay.
+All four recovered compact networks also passed checksum and CUDA validation;
+their model sizes and CPU/GPU output hashes match the earlier live run. The
+largest CPU/GPU output difference was `7.7486e-7`, and the largest zero-sum
+residual was `2.9802e-8`.
+
+The guarded random-opponent match completed and validated all 100 hands, 231
+bot decisions, and every final JSON/JSONL artifact before the pod was
+permanently deleted. The prior and current dealer seeds differ, so the results
+below are distribution-level timing evidence rather than paired hand-by-hand
+causal measurements. Both runs used the same RTX 4090 class, four checkpoints,
+1000 CFR iterations, and 500 skipped iterations.
+
+| Timing | Prior run | Optimized run | Change |
+|---|---:|---:|---:|
+| Active 100-hand match | `1085.60 s` | `784.32 s` | `27.75%` lower (`1.38x`) |
+| Total bot response time | `1053.17 s` / 230 decisions | `754.18 s` / 231 decisions | `28.39%` lower (`1.40x`) |
+| Fresh preflop response mean | `3.8605 s` | `3.6932 s` | `4.33%` lower |
+| Flop response mean | `9.5047 s` | `5.1703 s` | `45.60%` lower (`1.84x`) |
+| Turn response mean | `5.0370 s` | `4.2074 s` | `16.47%` lower |
+| River response mean | `2.7657 s` | `2.4022 s` | `13.14%` lower |
+
+The prior run replayed preflop CFR for 47 flop arrivals at a `4.7345 s` mean.
+The optimized run captured 52 arrivals at a `0.3800 s` mean, a conditional
+`12.46x` speedup. One deep multi-raise line fell outside the bounded capture
+and correctly used the exact legacy fallback in `3.1163 s`; live optimized-path
+coverage was therefore 52 of 53 eligible arrivals (`98.11%`).
+
+The postflop transform cache served 14 of 92 eligible decisions (`15.22%`).
+Cache-hit lookahead construction averaged `0.00307 s`, versus `0.98955 s` on
+misses, while retaining at most `519,792,000` bytes. These are production live
+measurements, although hit rate remains sensitive to repeated decisions on the
+same public board and action distribution.
+
+The completed evidence is under ignored
+`runs/play-ui/dyypholdem-ui-20260827T120409Z/`; the prior comparison run is
+`runs/play-ui/dyypholdem-ui-20260823T205907Z/`. The random match is a runtime
+workload, not an exploitability or playing-strength evaluation, and its chip
+result must not be used as one.
 
 The first real CPU gate compared commit `0f13fd4` with the current buffer-reuse
 candidate using the same 1,000 iterations, one warmup, and three measured
