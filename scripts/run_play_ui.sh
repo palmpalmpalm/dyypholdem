@@ -17,6 +17,7 @@ CONTROLLER_LOG="$SESSION_ROOT/controller.log"
 CONTROLLER_PID_FILE="$SESSION_ROOT/controller.pid"
 CONTROLLER_READY_WAIT_SECONDS="${DYYPHOLDEM_UI_CONTROLLER_READY_WAIT_SECONDS:-420}"
 GUARD_SECONDS="${DYYPHOLDEM_UI_GUARD_SECONDS:-3600}"
+MAX_TOTAL_COST_USD="${DYYPHOLDEM_UI_MAX_TOTAL_COST_USD:-}"
 GPU_TYPE="${DYYPHOLDEM_GPU_TYPE:-NVIDIA GeForce RTX 4090}"
 CLOUD_TYPE="${DYYPHOLDEM_GPU_CLOUD_TYPE:-SECURE}"
 HANDS="${DYYPHOLDEM_UI_HANDS:-100}"
@@ -76,6 +77,46 @@ validate_uint() {
   }
 }
 
+validate_optional_cost_cap() {
+  [ -z "$MAX_TOTAL_COST_USD" ] && return 0
+  "$LOCAL_PYTHON" - "$MAX_TOTAL_COST_USD" <<'PY'
+from decimal import Decimal, InvalidOperation
+import sys
+
+try:
+    cap = Decimal(sys.argv[1])
+except InvalidOperation:
+    raise SystemExit("DYYPHOLDEM_UI_MAX_TOTAL_COST_USD must be a positive decimal")
+if not cap.is_finite() or cap <= 0:
+    raise SystemExit("DYYPHOLDEM_UI_MAX_TOTAL_COST_USD must be a positive decimal")
+PY
+}
+
+enforce_projected_spend_cap() {
+  [ -z "$MAX_TOTAL_COST_USD" ] && return 0
+  "$LOCAL_PYTHON" - "$COST_PER_HOUR" "$GUARD_SECONDS" "$MAX_TOTAL_COST_USD" <<'PY'
+from decimal import Decimal, InvalidOperation
+import sys
+
+rate_text, guard_text, cap_text = sys.argv[1:]
+try:
+    rate = Decimal(rate_text)
+    guard_seconds = Decimal(guard_text)
+    cap = Decimal(cap_text)
+except InvalidOperation:
+    raise SystemExit("RunPod returned an invalid hourly price; rejecting paid session")
+if not rate.is_finite() or rate < 0:
+    raise SystemExit("RunPod returned an invalid hourly price; rejecting paid session")
+projected = rate * guard_seconds / Decimal(3600)
+if projected > cap:
+    raise SystemExit(
+        f"projected maximum compute cost ${projected:.4f} exceeds authorized ${cap:.4f}; "
+        "terminating immediately"
+    )
+print(f"projected maximum compute cost ${projected:.4f} is within authorized ${cap:.4f}")
+PY
+}
+
 validate_config() {
   validate_uint DYYPHOLDEM_UI_GUARD_SECONDS "$GUARD_SECONDS" 900 14400
   validate_uint DYYPHOLDEM_UI_HANDS "$HANDS" 1 1000
@@ -94,6 +135,7 @@ validate_config() {
     return 1
   }
   [ -n "$GPU_TYPE" ] || { echo "DYYPHOLDEM_GPU_TYPE must not be empty" >&2; return 1; }
+  validate_optional_cost_cap
 }
 
 validate_pod_identity() {
@@ -585,6 +627,7 @@ if [ "$COMMAND" = "dry-run" ]; then
     "  GPU regression: $GPU_REGRESSION (strict preflop root/chance tensors before UI start)" \
     "  controller: detached locally; start waits up to $CONTROLLER_READY_WAIT_SECONDS seconds for PLAY_UI_READY" \
     "  hard guard: $GUARD_SECONDS seconds; authenticated remote retry-delete plus independent local stop/delete watchdog" \
+    "  spend cap: ${MAX_TOTAL_COST_USD:-not configured} USD projected maximum compute cost" \
     "  shutdown: quiesce, retry final copyback, exact-name stop/delete, six successful absence checks"
   exit 0
 fi
@@ -726,6 +769,7 @@ FINAL_REASON="setup"
 write_manifest starting
 arm_local_watchdog
 write_manifest starting
+enforce_projected_spend_cap
 
 "$LOCAL_PYTHON" "$POD_HELPER" public-url --pod-id "$POD_ID" --http-port "$HTTP_PORT" > "$URL_JSON"
 PUBLIC_URL="$(json_field "$URL_JSON" url)"

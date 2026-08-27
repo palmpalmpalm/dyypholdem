@@ -40,6 +40,36 @@ class RunPlayUiLauncherTests(unittest.TestCase):
 
         self.assertIn("GPU regression: 0", result.stdout)
 
+    def test_dry_run_reports_projected_spend_cap(self):
+        env = os.environ.copy()
+        env["DYYPHOLDEM_UI_MAX_TOTAL_COST_USD"] = "0.50"
+        result = subprocess.run(
+            [str(LAUNCHER), "dry-run"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertIn(
+            "spend cap: 0.50 USD projected maximum compute cost",
+            result.stdout,
+        )
+
+    def test_invalid_spend_cap_fails_before_launch(self):
+        env = os.environ.copy()
+        env["DYYPHOLDEM_UI_MAX_TOTAL_COST_USD"] = "not-a-price"
+        result = subprocess.run(
+            [str(LAUNCHER), "dry-run"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be a positive decimal", result.stderr)
+
     def test_start_detaches_controller_and_waits_for_its_manifest(self):
         source = LAUNCHER.read_text()
         marker = '[ "$COMMAND" = "controller" ] || { usage >&2; exit 2; }\n'
