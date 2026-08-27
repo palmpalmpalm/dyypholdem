@@ -29,6 +29,7 @@ MODEL_ROOT="${DYYPHOLDEM_COMPACT_MODEL_PATH:-$PROJECT_DIR/runs/model-recovery/co
 HTTP_PORT=8000
 FINALIZE_MARGIN_SECONDS=90
 MATCH_COMPLETE_GRACE_SECONDS=60
+SPEND_SAFETY_MARGIN_SECONDS=30
 
 POD_ID=""
 POD_NAME=""
@@ -54,6 +55,7 @@ FINAL_REASON=""
 MANIFEST_STATUS=""
 POD_ACQUIRED=0
 ACQUISITION_ATTEMPTED=0
+ACQUISITION_START_EPOCH=""
 
 usage() {
   printf '%s\n' "usage: $0 [start|stop|status|logs|dry-run]"
@@ -105,7 +107,7 @@ try:
     cap = Decimal(cap_text)
 except InvalidOperation:
     raise SystemExit("RunPod returned an invalid hourly price; rejecting paid session")
-if not rate.is_finite() or rate < 0:
+if not rate.is_finite() or rate <= 0:
     raise SystemExit("RunPod returned an invalid hourly price; rejecting paid session")
 projected = rate * guard_seconds / Decimal(3600)
 if projected > cap:
@@ -732,6 +734,10 @@ PY
 }
 echo "RunPod preflight complete; no existing pod was changed"
 
+# Count the authorized window before the first create request. This makes API
+# latency and ambiguous-create recovery consume the allowance instead of
+# extending it, while the safety margin leaves time for provider-side deletion.
+ACQUISITION_START_EPOCH="$(date +%s)"
 for attempt in $(seq 1 10); do
   ACQUISITION_ATTEMPTED=1
   if "$LOCAL_PYTHON" "$POD_HELPER" create \
@@ -758,8 +764,8 @@ done
 [ -n "$POD_ID" ] || { echo "unable to acquire requested RTX 4090" >&2; exit 1; }
 validate_pod_identity
 
-# The absolute paid-resource deadline is fixed immediately after acquisition.
-ABSOLUTE_STOP_EPOCH=$(( $(date +%s) + GUARD_SECONDS ))
+# The absolute paid-resource deadline was anchored before acquisition.
+ABSOLUTE_STOP_EPOCH=$(( ACQUISITION_START_EPOCH + GUARD_SECONDS - SPEND_SAFETY_MARGIN_SECONDS ))
 SESSION_DEADLINE_EPOCH=$(( ABSOLUTE_STOP_EPOCH - FINALIZE_MARGIN_SECONDS ))
 if [ ! -s "$CREATE_JSON" ] || [ "$(json_field "$CREATE_JSON" id 2>/dev/null || true)" != "$POD_ID" ]; then
   "$LOCAL_PYTHON" "$POD_HELPER" status --pod-id "$POD_ID" > "$CREATE_JSON"

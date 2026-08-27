@@ -15,6 +15,26 @@ LAUNCHER = PROJECT_ROOT / "scripts" / "run_play_ui.sh"
 
 
 class RunPlayUiLauncherTests(unittest.TestCase):
+    def run_spend_gate(self, rate, guard_seconds="1800", cap="0.50"):
+        source = LAUNCHER.read_text()
+        marker = "validate_config() {\n"
+        prefix, found, _ = source.partition(marker)
+        self.assertEqual(found, marker)
+        script = (
+            prefix
+            + f"COST_PER_HOUR={rate!r}\n"
+            + f"GUARD_SECONDS={guard_seconds!r}\n"
+            + f"MAX_TOTAL_COST_USD={cap!r}\n"
+            + "enforce_projected_spend_cap\n"
+        )
+        return subprocess.run(
+            ["bash"],
+            input=script,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
     def test_dry_run_reports_detached_controller(self):
         result = subprocess.run(
             [str(LAUNCHER), "dry-run"],
@@ -69,6 +89,18 @@ class RunPlayUiLauncherTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be a positive decimal", result.stderr)
+
+    def test_spend_gate_accepts_exact_authorized_boundary(self):
+        result = self.run_spend_gate("1.00")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("$0.5000 is within authorized $0.5000", result.stdout)
+
+    def test_spend_gate_rejects_overpriced_or_invalid_quotes(self):
+        for rate in ("1.0001", "0", "unknown", "NaN", "Infinity"):
+            with self.subTest(rate=rate):
+                result = self.run_spend_gate(rate)
+                self.assertNotEqual(result.returncode, 0)
 
     def test_start_detaches_controller_and_waits_for_its_manifest(self):
         source = LAUNCHER.read_text()

@@ -59,7 +59,10 @@ while [ "$(date +%s)" -lt "$DEADLINE_EPOCH" ]; do
     write_status cancelled "controller verified exact-name absence"
     exit 0
   fi
-  sleep 5
+  now_epoch="$(date +%s)"
+  remaining_seconds=$(( DEADLINE_EPOCH - now_epoch ))
+  [ "$remaining_seconds" -gt 0 ] || break
+  [ "$remaining_seconds" -le 5 ] && sleep "$remaining_seconds" || sleep 5
 done
 
 if [ -e "$CANCEL_FILE" ]; then
