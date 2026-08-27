@@ -192,6 +192,23 @@ class ContinualResolving(object):
             "lookahead_tensor_seconds": phase_timing.get("lookahead_tensor_seconds", 0.0),
             "lookahead_build_seconds": phase_timing.get("lookahead_build_seconds", 0.0),
             "cfr_seconds": phase_timing.get("cfr_seconds", 0.0),
+            "cuda_graph_mode": phase_timing.get("cuda_graph_mode", "off"),
+            "cuda_graph_requested": phase_timing.get(
+                "cuda_graph_requested", False
+            ),
+            "cuda_graph_used": phase_timing.get("cuda_graph_used", False),
+            "cuda_graph_reason": phase_timing.get(
+                "cuda_graph_reason", "not-run"
+            ),
+            "cuda_graph_eager_iterations": phase_timing.get(
+                "cuda_graph_eager_iterations", 0
+            ),
+            "cuda_graph_captures": phase_timing.get(
+                "cuda_graph_captures", 0
+            ),
+            "cuda_graph_replays": phase_timing.get(
+                "cuda_graph_replays", 0
+            ),
             "results_seconds": phase_timing.get("results_seconds", 0.0),
             "resolve_total_seconds": phase_timing.get("resolve_total_seconds", 0.0),
             "sampling_seconds": sampling_seconds,

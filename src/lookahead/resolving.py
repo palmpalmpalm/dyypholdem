@@ -59,6 +59,9 @@ class Resolving(object):
             ),
         }
 
+    def _cuda_graph_telemetry(self):
+        return self.lookahead.get_cuda_graph_telemetry()
+
     # -- Re-solves a depth-limited lookahead using input ranges.
     # --
     # -- Uses the input range for the opponent instead of a gadget range, so only
@@ -113,6 +116,7 @@ class Resolving(object):
             "results_seconds": results_seconds,
             "resolve_total_seconds": self._elapsed(total_started),
             **self._bucketing_cache_telemetry(),
+            **self._cuda_graph_telemetry(),
         }
 
         return self.resolve_results
@@ -167,6 +171,7 @@ class Resolving(object):
             "results_seconds": results_seconds,
             "resolve_total_seconds": self._elapsed(total_started),
             **self._bucketing_cache_telemetry(),
+            **self._cuda_graph_telemetry(),
         }
         return self.resolve_results
 

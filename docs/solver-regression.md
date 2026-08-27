@@ -1,6 +1,6 @@
 # Deterministic Solver Optimization Gate
 
-Date: 2026-08-27 (Asia/Bangkok)
+Date: 2026-08-28 (Asia/Bangkok)
 
 ## Purpose
 
@@ -82,6 +82,7 @@ python scripts/solver_regression.py capture \
 python scripts/solver_regression.py compare \
   --baseline runs/solver-regression/baseline.json \
   --candidate runs/solver-regression/candidate.json \
+  --require-bitwise \
   --max-runtime-ratio 1.10 \
   --output runs/solver-regression/comparison.json
 ```
@@ -127,14 +128,8 @@ changed, because that would mix implementation and hardware effects.
 python scripts/solver_regression.py preflight \
   --device cuda --spot preflop-root
 
-python scripts/solver_regression.py capture \
-  --device cuda --spot preflop-root \
-  --iterations 1000 --warmups 1 --repeats 3 --threads 1 \
-  --output runs/solver-regression/candidate-4090.json
-
-make solver-regression-river \
-  SOLVER_REGRESSION_DEVICE=cuda \
-  SOLVER_REGRESSION_OUTPUT=runs/solver-regression/river-4090.json
+python scripts/solver_regression.py preflight \
+  --device cuda --spot river-7d7c8s5sQd
 ```
 
 CUDA wall timings are synchronized before the timer starts and after the work
@@ -152,6 +147,95 @@ bit-identical full tensors across repeats. If the installed PyTorch/CUDA build
 cannot provide deterministic behavior, the command exits with an actionable
 error; it never silently weakens the quality gate. A CPU-only machine can run
 the unit tests and receives a clear `cuda-unavailable` preflight result.
+
+### Preflop Memory A/B (CUDA Graphs Off)
+
+Run the preflop memory candidate as a source A/B with CUDA Graphs explicitly
+off in both worktrees. CUDA Graph execution is river-only, and mixing it into
+this experiment would confound the retained-allocation measurement. Use the
+same verified assets, compact models, GPU, driver, and PyTorch build for both
+captures:
+
+```shell
+python scripts/solver_regression.py capture \
+  --source-root /path/to/baseline-worktree \
+  --asset-root "$PWD" \
+  --model-root "$PWD/runs/model-recovery/compact" \
+  --device cuda --cuda-graphs off --spot preflop-root \
+  --iterations 1000 --skip-iterations 500 \
+  --warmups 1 --repeats 3 --threads 1 \
+  --output runs/solver-regression/preflop-memory-baseline.json
+
+python scripts/solver_regression.py capture \
+  --source-root "$PWD" \
+  --asset-root "$PWD" \
+  --model-root "$PWD/runs/model-recovery/compact" \
+  --device cuda --cuda-graphs off --spot preflop-root \
+  --iterations 1000 --skip-iterations 500 \
+  --warmups 1 --repeats 3 --threads 1 \
+  --output runs/solver-regression/preflop-memory-candidate.json
+
+python scripts/solver_regression.py compare \
+  --baseline runs/solver-regression/preflop-memory-baseline.json \
+  --candidate runs/solver-regression/preflop-memory-candidate.json \
+  --require-bitwise \
+  --output runs/solver-regression/preflop-memory-comparison.json
+```
+
+The candidate releases the temporary `117,218,400`-byte preflop bucket source
+after deriving the final gather and scatter indexes. The comparison must pass
+the raw float32 SHA-256 gate, and the capture JSON's top-level and per-spot
+`cuda_memory` fields must preserve the measured retained and peak allocation
+change. The comparator does not impose a memory threshold, so inspect and save
+those A/B deltas with the comparison result.
+
+### River CUDA Graph A/B (Off vs Required)
+
+Keep the source tree fixed and compare the existing eager river loop (`off`)
+with fail-closed CUDA Graph execution (`required`). The Makefile intentionally
+defaults `SOLVER_REGRESSION_CUDA_GRAPHS` to `off`; opt in only for this isolated
+gate:
+
+```shell
+make solver-regression-river \
+  SOLVER_REGRESSION_DEVICE=cuda \
+  SOLVER_REGRESSION_CUDA_GRAPHS=off \
+  SOLVER_REGRESSION_OUTPUT=runs/solver-regression/river-graphs-off.json
+
+make solver-regression-river \
+  SOLVER_REGRESSION_DEVICE=cuda \
+  SOLVER_REGRESSION_CUDA_GRAPHS=required \
+  SOLVER_REGRESSION_OUTPUT=runs/solver-regression/river-graphs-required.json
+
+python scripts/solver_regression.py compare \
+  --baseline runs/solver-regression/river-graphs-off.json \
+  --candidate runs/solver-regression/river-graphs-required.json \
+  --require-bitwise \
+  --max-runtime-ratio 1.10 \
+  --output runs/solver-regression/river-graphs-comparison.json
+```
+
+For the standard 1,000 iterations with 500 skipped iterations, every warmup
+and measured `required` solve must report `cuda_graph_used=true`, reason
+`enabled`, six eager iterations, two graph captures, and 994 graph replays.
+The two three-iteration eager warmups cover the burn-in and averaging phases;
+captures record graphs but do not count as CFR iterations, so
+`6 + 994 = 1000`. Any other count or an unused graph invalidates the capture
+before output comparison.
+
+`required` rejects an ineligible solve before computation. `auto` may use the
+eager loop only when eligibility fails before solver state is mutated. Once
+eager graph warmups mutate live solver tensors, any capture error aborts the
+solve without eager fallback; continuing eagerly could mix partially mutated
+state into the result.
+
+This preflop memory candidate and CUDA Graph execution path have not yet been
+validated by a fresh real-GPU A/B. The 2026-08-27 RTX 4090 results below predate
+these changes and do not validate them. Production therefore remains
+unchanged: CUDA Graphs stay `off` by default, and the live UI must not enable
+`DYYPHOLDEM_CUDA_GRAPHS` until the strict hardware gates above pass and the
+project explicitly promotes the mode. Keep graph qualification single-flight;
+concurrent process-wide CUDA capture has not been validated.
 
 ## Iteration Sweeps
 
@@ -173,6 +257,24 @@ must be an explicit project decision rather than an accidental consequence of
 asking for more speed.
 
 ## Verified Initial Result
+
+### 2026-08-28 Local Exact-Kernel Gate
+
+The current candidate fuses the two per-player legal-action mask launches into
+one broadcasted multiplication and releases the temporary preflop bucket
+source after constructing the final integer indexes. On the archived
+pre-change versus current `river-7d7c8s5sQd` CPU gate, both using eager/off
+mode and 1,000/500 iterations, every strategy and CFV raw tensor hash matched;
+all numeric limits were set to zero. The observed median moved from
+`0.507782 s` to `0.453043 s` (`0.8922` runtime ratio, `1.121x`), but this short
+CPU result is noisy and is not yet a causal RTX 4090 speedup claim. The current
+full Python suite reports `119` tests, `OK`, with five platform/hardware skips.
+The ignored captures and strict comparison are saved under
+`runs/solver-regression/optimization-sprint-20260828/`.
+
+The CUDA Graph path is covered by a non-executing-capture runner model and
+fail-closed telemetry tests, but only a real `required`-mode CUDA capture can
+qualify its kernels, private-pool VRAM overhead, exact outputs, and speed.
 
 Postflop resolves now retain one immutable board-specific bucketing transform
 for reuse by another decision on the same public board. The forward and reverse

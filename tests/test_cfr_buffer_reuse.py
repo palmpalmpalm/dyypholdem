@@ -51,7 +51,7 @@ with mock.patch.dict(
 
 
 class CfrIterationBufferReuseTest(unittest.TestCase):
-    def _make_lookahead(self):
+    def _make_lookahead(self, dtype=torch.float32):
         lookahead = Lookahead.__new__(Lookahead)
         lookahead.depth = 2
         lookahead.regret_epsilon = 1e-7
@@ -63,14 +63,15 @@ class CfrIterationBufferReuseTest(unittest.TestCase):
                 [[[[1.0, -2.0, 0.0, 4.0], [3.0, 0.0, 1.0, -1.0]]]],
                 [[[[2.0, 3.0, -1.0, 0.0], [0.0, 2.0, 5.0, 1.0]]]],
                 [[[[0.0, 1.0, 6.0, 2.0], [4.0, -3.0, 2.0, 3.0]]]],
-            ]
+            ],
+            dtype=dtype,
         )
         lookahead.regrets_data = {2: regrets.clone()}
         lookahead.positive_regrets_data = {2: torch.empty_like(regrets)}
         lookahead.current_strategy_data = {2: torch.empty_like(regrets)}
         lookahead.empty_action_mask = {2: torch.ones_like(regrets)}
         lookahead.placeholder_data = {
-            2: torch.empty(3, 1, 1, 2, 2, 4)
+            2: torch.empty(3, 1, 1, 2, 2, 4, dtype=dtype)
         }
         return lookahead
 
@@ -123,6 +124,73 @@ class CfrIterationBufferReuseTest(unittest.TestCase):
         lookahead.cfvs_data[2].copy_(source_cfvs)
         lookahead._compute_cfvs()
         self.assertEqual(lookahead.cfvs_sum_data[2].data_ptr(), sum_pointer)
+
+    def test_cfv_mask_broadcast_matches_legacy_player_plane_updates(self):
+        for dtype in (torch.float32, torch.float64):
+            for acting_player in (1, 2):
+                with self.subTest(dtype=dtype, acting_player=acting_player):
+                    lookahead = self._make_lookahead(dtype)
+                    source_cfvs = (
+                        torch.arange(48, dtype=dtype).add_(0.125).view(
+                            3, 1, 1, 2, 2, 4
+                        )
+                    )
+                    action_mask = torch.tensor(
+                        [
+                            [[[[1.0, 0.0, 0.5, 0.25], [2.0, 1.0, 0.5, 0.0]]]],
+                            [[[[0.5, 1.0, 2.0, 0.0], [1.0, 0.25, 0.5, 2.0]]]],
+                            [[[[0.0, 0.25, 1.0, 2.0], [0.5, 1.0, 0.0, 0.25]]]],
+                        ],
+                        dtype=dtype,
+                    )
+                    strategy = torch.tensor(
+                        [0.25, 0.5, 0.25], dtype=dtype
+                    ).view(3, 1, 1, 1, 1)
+                    lookahead.empty_action_mask = {2: action_mask}
+                    lookahead.current_strategy_data[2].copy_(strategy)
+                    lookahead.cfvs_data = {
+                        1: torch.zeros(
+                            1, 1, 1, 2, 2, 4, dtype=dtype
+                        ),
+                        2: source_cfvs.clone(),
+                    }
+                    lookahead.acting_player = {2: acting_player}
+                    lookahead.terminal_actions_count = {0: 0}
+                    lookahead.nonallinbets_count = {-1: 1}
+                    lookahead.swap_data = {
+                        1: torch.empty(
+                            1, 1, 1, 2, 2, 4, dtype=dtype
+                        )
+                    }
+                    lookahead._ensure_iteration_buffers()
+
+                    legacy = source_cfvs.clone()
+                    legacy[:, :, :, :, 0, :].mul_(action_mask)
+                    legacy[:, :, :, :, 1, :].mul_(action_mask)
+                    expected_masked = legacy.clone()
+                    legacy[
+                        :, :, :, :, acting_player - 1, :
+                    ].mul_(strategy)
+                    expected_parent = legacy.sum(0).view(
+                        1, 1, 1, 2, 2, 4
+                    )
+                    masked_pointer = lookahead.cfvs_data[2].data_ptr()
+
+                    lookahead._compute_cfvs()
+
+                    self.assertEqual(
+                        lookahead.cfvs_data[2].data_ptr(), masked_pointer
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            lookahead.cfvs_data[2], expected_masked
+                        )
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            lookahead.cfvs_data[1], expected_parent
+                        )
+                    )
 
     def test_fold_terminal_negates_only_the_acting_player(self):
         class TerminalEquityStub:
@@ -450,6 +518,390 @@ class NextRoundValueBufferReuseTest(unittest.TestCase):
         self.assertEqual(
             calculator.values_per_board.data_ptr(), gathered_pointer
         )
+
+    def test_preflop_bucket_source_is_released_after_index_construction(self):
+        for source_dtype in (torch.float32, torch.long):
+            with self.subTest(source_dtype=source_dtype):
+                calculator = NextRoundValuePre.__new__(NextRoundValuePre)
+                source_buckets = torch.tensor(
+                    [[1, -1, 3], [2, 1, -1]], dtype=source_dtype
+                )
+                source_before = source_buckets.clone()
+
+                with (
+                    mock.patch.object(arguments, "use_gpu", False),
+                    mock.patch.object(arguments, "Tensor", torch.FloatTensor),
+                    mock.patch.object(game_settings, "hand_count", 3),
+                    mock.patch.object(
+                        game_settings, "board_card_count", [0, 3, 4, 5]
+                    ),
+                    mock.patch.object(game_settings, "card_count", 7),
+                    mock.patch.object(game_settings, "hand_card_count", 2),
+                    mock.patch.object(
+                        next_round_value_pre_module.card_tools,
+                        "board_to_street",
+                        return_value=1,
+                    ),
+                    mock.patch.object(
+                        next_round_value_pre_module.card_tools,
+                        "get_next_round_boards",
+                        return_value=torch.zeros(2, 3),
+                    ),
+                    mock.patch.object(
+                        next_round_value_pre_module.bucketer,
+                        "get_bucket_count",
+                        side_effect=lambda street: {1: 3, 2: 3}[street],
+                    ),
+                    mock.patch.object(
+                        next_round_value_pre_module.bucketer,
+                        "compute_buckets",
+                        return_value=torch.tensor([1.0, 2.0, 3.0]),
+                    ),
+                    mock.patch.object(
+                        next_round_value_pre_module.torch,
+                        "load",
+                        return_value=source_buckets,
+                    ),
+                ):
+                    calculator._init_bucketing(torch.tensor([]))
+
+                self.assertFalse(hasattr(calculator, "board_buckets"))
+                self.assertTrue(torch.equal(source_buckets, source_before))
+                source_storage = source_buckets.untyped_storage().data_ptr()
+                retained_source_storages = [
+                    name
+                    for name, value in vars(calculator).items()
+                    if torch.is_tensor(value)
+                    and value.numel() > 0
+                    and value.untyped_storage().data_ptr() == source_storage
+                ]
+                self.assertEqual(retained_source_storages, [])
+                self.assertEqual(
+                    calculator.impossible_mask.dtype, torch.bool
+                )
+                self.assertEqual(calculator.board_indexes.dtype, torch.long)
+                self.assertEqual(
+                    calculator.board_indexes_scatter.dtype, torch.long
+                )
+                expected_gather = torch.tensor(
+                    [[0, 0, 2], [1, 0, 0]]
+                )
+                expected_scatter = torch.tensor(
+                    [[0, 3, 2], [1, 0, 3]]
+                )
+                self.assertTrue(
+                    torch.equal(calculator.board_indexes, expected_gather)
+                )
+                self.assertTrue(
+                    torch.equal(
+                        calculator.board_indexes_scatter, expected_scatter
+                    )
+                )
+                source_buckets.fill_(-99)
+                self.assertTrue(
+                    torch.equal(calculator.board_indexes, expected_gather)
+                )
+                self.assertTrue(
+                    torch.equal(
+                        calculator.board_indexes_scatter, expected_scatter
+                    )
+                )
+
+
+class CudaGraphExecutionPlanningTest(unittest.TestCase):
+    def test_standard_phase_plan_counts_every_iteration_once(self):
+        plan = Lookahead._cuda_graph_phase_plan(1000, 500, 3)
+        self.assertEqual(
+            plan,
+            [
+                {
+                    "name": "burn-in",
+                    "iterations": 500,
+                    "representative_iteration": 1,
+                    "eager_iterations": 3,
+                    "captures": 1,
+                    "replays": 497,
+                },
+                {
+                    "name": "averaging",
+                    "iterations": 500,
+                    "representative_iteration": 501,
+                    "eager_iterations": 3,
+                    "captures": 1,
+                    "replays": 497,
+                },
+            ],
+        )
+        self.assertEqual(
+            sum(
+                phase["eager_iterations"]
+                + phase["replays"]
+                for phase in plan
+            ),
+            1000,
+        )
+        self.assertEqual(sum(phase["captures"] for phase in plan), 2)
+
+    def test_phase_plan_rejects_empty_average_and_zero_warmup(self):
+        with self.assertRaisesRegex(ValueError, "0 <= skip < iterations"):
+            Lookahead._cuda_graph_phase_plan(1000, 1000, 3)
+        with self.assertRaisesRegex(ValueError, "warmups must be positive"):
+            Lookahead._cuda_graph_phase_plan(1000, 500, 0)
+
+    def test_graph_runner_treats_capture_as_nonexecuting(self):
+        state = {
+            "capturing": False,
+            "executed": [],
+            "captured": [],
+            "stream_synchronizations": 0,
+        }
+
+        class FakeStream:
+            def wait_stream(self, _other):
+                pass
+
+            def synchronize(self):
+                state["stream_synchronizations"] += 1
+
+        graph_stream = FakeStream()
+        caller_stream = FakeStream()
+
+        class FakeGraph:
+            representative = None
+
+            def replay(self):
+                state["executed"].append(self.representative)
+
+        class StreamContext:
+            def __enter__(self):
+                return graph_stream
+
+            def __exit__(self, _exc_type, _exc, _traceback):
+                return False
+
+        class GraphContext:
+            def __init__(self, graph):
+                self.graph = graph
+
+            def __enter__(self):
+                state["capturing"] = True
+                return self.graph
+
+            def __exit__(self, _exc_type, _exc, _traceback):
+                state["capturing"] = False
+                return False
+
+        lookahead = Lookahead.__new__(Lookahead)
+        lookahead.ranges_data = {
+            1: SimpleNamespace(device=torch.device("cuda"))
+        }
+        lookahead._cuda_graph_handles = []
+        lookahead._cuda_graph_stream = None
+        lookahead.cuda_graph_telemetry = {}
+
+        def iteration(representative):
+            if state["capturing"]:
+                state["captured"].append(representative)
+                active_graph.representative = representative
+            else:
+                state["executed"].append(representative)
+
+        active_graph = None
+
+        def graph_context(graph, **_kwargs):
+            nonlocal active_graph
+            active_graph = graph
+            return GraphContext(graph)
+
+        lookahead._compute_iteration = iteration
+        plan = Lookahead._cuda_graph_phase_plan(10, 5, 1)
+        with (
+            mock.patch.object(
+                torch.cuda, "current_stream", return_value=caller_stream
+            ),
+            mock.patch.object(torch.cuda, "Stream", return_value=graph_stream),
+            mock.patch.object(torch.cuda, "stream", return_value=StreamContext()),
+            mock.patch.object(torch.cuda, "CUDAGraph", side_effect=FakeGraph),
+            mock.patch.object(torch.cuda, "graph", side_effect=graph_context),
+        ):
+            lookahead._compute_with_cuda_graphs(plan)
+
+        self.assertEqual(state["captured"], [1, 6])
+        self.assertEqual(state["executed"], [1] * 5 + [6] * 5)
+        self.assertEqual(state["stream_synchronizations"], 3)
+        self.assertEqual(
+            lookahead.cuda_graph_telemetry["cuda_graph_eager_iterations"], 2
+        )
+        self.assertEqual(
+            lookahead.cuda_graph_telemetry["cuda_graph_captures"], 2
+        )
+        self.assertEqual(
+            lookahead.cuda_graph_telemetry["cuda_graph_replays"], 8
+        )
+
+    def test_graph_runner_synchronizes_side_stream_after_replay_failure(self):
+        synchronizations = []
+
+        class FakeStream:
+            def wait_stream(self, _other):
+                pass
+
+            def synchronize(self):
+                synchronizations.append("sync")
+
+        class FakeGraph:
+            def replay(self):
+                raise ValueError("replay failed")
+
+        class Context:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _traceback):
+                return False
+
+        graph_stream = FakeStream()
+        lookahead = Lookahead.__new__(Lookahead)
+        lookahead.ranges_data = {
+            1: SimpleNamespace(device=torch.device("cuda"))
+        }
+        lookahead._cuda_graph_handles = []
+        lookahead._cuda_graph_stream = None
+        lookahead.cuda_graph_telemetry = {}
+        lookahead._compute_iteration = mock.Mock()
+        plan = [
+            {
+                "representative_iteration": 1,
+                "eager_iterations": 1,
+                "captures": 1,
+                "replays": 1,
+            }
+        ]
+
+        with (
+            mock.patch.object(
+                torch.cuda, "current_stream", return_value=FakeStream()
+            ),
+            mock.patch.object(torch.cuda, "Stream", return_value=graph_stream),
+            mock.patch.object(torch.cuda, "stream", return_value=Context()),
+            mock.patch.object(torch.cuda, "CUDAGraph", side_effect=FakeGraph),
+            mock.patch.object(torch.cuda, "graph", return_value=Context()),
+        ):
+            with self.assertRaisesRegex(ValueError, "replay failed"):
+                lookahead._compute_with_cuda_graphs(plan)
+
+        self.assertEqual(synchronizations, ["sync", "sync"])
+        self.assertEqual(len(lookahead._cuda_graph_handles), 1)
+        self.assertIs(lookahead._cuda_graph_stream, graph_stream)
+
+    def test_compute_iteration_preserves_legacy_call_order(self):
+        lookahead = Lookahead.__new__(Lookahead)
+        calls = []
+        for name in (
+            "_set_opponent_starting_range",
+            "_compute_current_strategies",
+            "_compute_ranges",
+            "_compute_terminal_equities",
+            "_compute_cfvs",
+            "_compute_regrets",
+        ):
+            setattr(
+                lookahead,
+                name,
+                lambda name=name: calls.append(name),
+            )
+        lookahead._compute_update_average_strategies = (
+            lambda iteration: calls.append(("strategy", iteration))
+        )
+        lookahead._compute_cumulate_average_cfvs = (
+            lambda iteration: calls.append(("cfvs", iteration))
+        )
+
+        lookahead._compute_iteration(501)
+
+        self.assertEqual(
+            calls,
+            [
+                "_set_opponent_starting_range",
+                "_compute_current_strategies",
+                "_compute_ranges",
+                ("strategy", 501),
+                "_compute_terminal_equities",
+                "_compute_cfvs",
+                "_compute_regrets",
+                ("cfvs", 501),
+            ],
+        )
+
+    def _planning_lookahead(self):
+        lookahead = Lookahead.__new__(Lookahead)
+        lookahead._ensure_iteration_buffers = mock.Mock()
+        lookahead._compute_normalize_average_strategies = mock.Mock()
+        lookahead._compute_normalize_average_cfvs = mock.Mock()
+        lookahead._cuda_graph_handles = []
+        lookahead._cuda_graph_stream = None
+        lookahead.cuda_graph_telemetry = {}
+        return lookahead
+
+    def test_auto_mode_falls_back_before_mutation_on_cpu(self):
+        lookahead = self._planning_lookahead()
+        iterations = []
+        lookahead._compute_iteration = iterations.append
+        with (
+            mock.patch.object(arguments, "cuda_graph_mode", "auto"),
+            mock.patch.object(arguments, "use_gpu", False),
+            mock.patch.object(arguments, "cfr_iters", 4),
+            mock.patch.object(arguments, "cfr_skip_iters", 2),
+        ):
+            lookahead._compute()
+
+        self.assertEqual(iterations, [1, 2, 3, 4])
+        self.assertFalse(lookahead.cuda_graph_telemetry["cuda_graph_used"])
+        self.assertEqual(
+            lookahead.cuda_graph_telemetry["cuda_graph_reason"],
+            "gpu-disabled",
+        )
+
+    def test_required_mode_rejects_ineligible_solve_before_mutation(self):
+        lookahead = self._planning_lookahead()
+        lookahead._compute_iteration = mock.Mock()
+        with (
+            mock.patch.object(arguments, "cuda_graph_mode", "required"),
+            mock.patch.object(arguments, "use_gpu", False),
+            mock.patch.object(arguments, "cfr_iters", 4),
+            mock.patch.object(arguments, "cfr_skip_iters", 2),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "gpu-disabled"):
+                lookahead._compute()
+
+        lookahead._compute_iteration.assert_not_called()
+        lookahead._compute_normalize_average_strategies.assert_not_called()
+        lookahead._compute_normalize_average_cfvs.assert_not_called()
+
+    def test_capture_failure_never_continues_with_eager_state(self):
+        lookahead = self._planning_lookahead()
+        mutations = []
+        lookahead._cuda_graph_ineligibility = mock.Mock(return_value=None)
+
+        def fail_after_mutation(_plan):
+            mutations.append("captured")
+            raise ValueError("capture failed")
+
+        lookahead._compute_with_cuda_graphs = fail_after_mutation
+        lookahead._compute_eager = mock.Mock()
+        with (
+            mock.patch.object(arguments, "cuda_graph_mode", "required"),
+            mock.patch.object(arguments, "cfr_iters", 1000),
+            mock.patch.object(arguments, "cfr_skip_iters", 500),
+            mock.patch.object(arguments, "cuda_graph_eager_warmups", 3),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "without eager fallback"
+            ):
+                lookahead._compute()
+
+        self.assertEqual(mutations, ["captured"])
+        lookahead._compute_eager.assert_not_called()
 
 
 if __name__ == "__main__":

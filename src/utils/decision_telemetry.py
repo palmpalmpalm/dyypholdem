@@ -215,6 +215,45 @@ def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object
         ),
     }
 
+    cuda_graph_requests = [
+        item
+        for item in decisions
+        if item.get("cuda_graph_requested") is True
+    ]
+    cuda_graph_used = [
+        item
+        for item in cuda_graph_requests
+        if item.get("cuda_graph_used") is True
+    ]
+    cuda_graph_fallbacks = [
+        item
+        for item in cuda_graph_requests
+        if item.get("cuda_graph_used") is not True
+    ]
+    cuda_graph_reasons: dict[str, int] = defaultdict(int)
+    for item in cuda_graph_requests:
+        cuda_graph_reasons[
+            str(item.get("cuda_graph_reason", "unknown"))
+        ] += 1
+    cuda_graph_execution = {
+        "requested_decisions": len(cuda_graph_requests),
+        "graphed_decisions": len(cuda_graph_used),
+        "fallback_decisions": len(cuda_graph_fallbacks),
+        "eager_iterations": sum(
+            int(item.get("cuda_graph_eager_iterations", 0))
+            for item in cuda_graph_requests
+        ),
+        "captures": sum(
+            int(item.get("cuda_graph_captures", 0))
+            for item in cuda_graph_requests
+        ),
+        "replays": sum(
+            int(item.get("cuda_graph_replays", 0))
+            for item in cuda_graph_requests
+        ),
+        "reasons": dict(sorted(cuda_graph_reasons.items())),
+    }
+
     completed_hand_numbers = {
         hand_number
         for item in hand_results
@@ -245,6 +284,10 @@ def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object
                 "bucketing_transform_bytes": item.get(
                     "bucketing_transform_bytes"
                 ),
+                "cuda_graph_used": item.get("cuda_graph_used"),
+                "cuda_graph_reason": item.get("cuda_graph_reason"),
+                "cuda_graph_captures": item.get("cuda_graph_captures"),
+                "cuda_graph_replays": item.get("cuda_graph_replays"),
                 "peak_cuda_allocated_bytes": item.get("peak_cuda_allocated_bytes"),
             }
         )
@@ -264,6 +307,7 @@ def build_report(events: Iterable[dict[str, object]], metadata: dict[str, object
         "preflop_solve_modes": preflop_modes,
         "chance_reconstruction": chance_reconstruction,
         "postflop_bucketing_cache": postflop_bucketing_cache,
+        "cuda_graph_execution": cuda_graph_execution,
         "recent_decisions": recent,
     }
 
@@ -319,6 +363,20 @@ def render_text_report(report: dict[str, object]) -> str:
             f"- hit build mean={cache['hit_lookahead_build_seconds']['mean']:.6f}s, "
             f"miss build mean={cache['miss_lookahead_build_seconds']['mean']:.6f}s, "
             f"max transform bytes={cache['max_transform_bytes']}",
+        ]
+    )
+    cuda_graph = report["cuda_graph_execution"]
+    lines.extend(
+        [
+            "",
+            "CUDA Graph execution",
+            f"- requested={cuda_graph['requested_decisions']}, "
+            f"graphed={cuda_graph['graphed_decisions']}, "
+            f"fallback={cuda_graph['fallback_decisions']}",
+            f"- eager iterations={cuda_graph['eager_iterations']}, "
+            f"captures={cuda_graph['captures']}, "
+            f"replays={cuda_graph['replays']}",
+            f"- reasons={cuda_graph['reasons']}",
         ]
     )
     return "\n".join(lines) + "\n"

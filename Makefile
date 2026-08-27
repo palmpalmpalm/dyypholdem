@@ -7,6 +7,7 @@ SOLVER_REGRESSION_ASSET_ROOT ?= .
 SOLVER_REGRESSION_MODEL_ROOT ?= runs/model-recovery/compact
 SOLVER_REGRESSION_OUTPUT ?= runs/solver-regression/current-river.json
 SOLVER_REGRESSION_DEVICE ?= cpu
+SOLVER_REGRESSION_CUDA_GRAPHS ?= off
 
 test:
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
@@ -79,6 +80,7 @@ solver-regression-river:
 		--asset-root "$(SOLVER_REGRESSION_ASSET_ROOT)" \
 		--model-root "$(SOLVER_REGRESSION_MODEL_ROOT)" \
 		--device "$(SOLVER_REGRESSION_DEVICE)" \
+		--cuda-graphs "$(SOLVER_REGRESSION_CUDA_GRAPHS)" \
 		--spot river-7d7c8s5sQd \
 		--iterations 1000 --warmups 1 --repeats 3 --threads 1 \
 		--output "$(SOLVER_REGRESSION_OUTPUT)"

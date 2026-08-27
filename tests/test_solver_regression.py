@@ -23,6 +23,7 @@ from solver_regression import (  # noqa: E402
     TIMING_FIELDS,
     Thresholds,
     _preflight_failures,
+    _output_hash_mismatches,
     _tensor_payload,
     build_parser,
     compare_snapshots,
@@ -183,6 +184,33 @@ def _add_cuda_metadata(snapshot: dict) -> None:
     }
 
 
+def _add_cuda_graph_metadata(
+    snapshot: dict,
+    mode: str,
+    *,
+    used: bool,
+    reason: str,
+    eager: int,
+    captures: int,
+    replays: int,
+) -> None:
+    snapshot["configuration"]["cuda_graph_mode"] = mode
+    snapshot["configuration"]["cuda_graph_eager_warmups"] = 3
+    sample = {
+        "cuda_graph_mode": mode,
+        "cuda_graph_requested": mode != "off",
+        "cuda_graph_used": used,
+        "cuda_graph_reason": reason,
+        "cuda_graph_eager_iterations": eager,
+        "cuda_graph_captures": captures,
+        "cuda_graph_replays": replays,
+    }
+    snapshot["spots"][0]["cuda_graph"] = {
+        "warmups": [copy.deepcopy(sample)],
+        "measured_repeats": [copy.deepcopy(sample) for _ in range(3)],
+    }
+
+
 def _add_preflop_chance_capture(snapshot: dict, delta: float = 0.0) -> None:
     snapshot["spots"][0]["spec"]["street"] = 1
     boards = []
@@ -237,11 +265,24 @@ class SolverRegressionTest(unittest.TestCase):
         cpu = build_parser().parse_args(
             ["capture", "--output", "capture.json"]
         )
+        graphed = build_parser().parse_args(
+            [
+                "capture",
+                "--device",
+                "cuda",
+                "--cuda-graphs",
+                "required",
+                "--output",
+                "capture.json",
+            ]
+        )
         cuda = build_parser().parse_args(
             ["preflight", "--device", "cuda"]
         )
 
         self.assertEqual(cpu.device, "cpu")
+        self.assertEqual(cpu.cuda_graphs, "off")
+        self.assertEqual(graphed.cuda_graphs, "required")
         self.assertEqual(cuda.device, "cuda")
 
     def test_cuda_unavailable_preflight_is_clear(self):
@@ -343,6 +384,96 @@ class SolverRegressionTest(unittest.TestCase):
         _add_cuda_metadata(snapshot)
         validate_snapshot(snapshot)
 
+    def test_required_cuda_graph_capture_validates_every_solve(self):
+        snapshot = _snapshot()
+        _add_cuda_metadata(snapshot)
+        _add_cuda_graph_metadata(
+            snapshot,
+            "required",
+            used=True,
+            reason="enabled",
+            eager=6,
+            captures=2,
+            replays=994,
+        )
+
+        validate_snapshot(snapshot)
+
+        snapshot["spots"][0]["cuda_graph"]["measured_repeats"][1][
+            "cuda_graph_replays"
+        ] = 993
+        with self.assertRaisesRegex(RegressionError, "executed 999 CFR iterations"):
+            validate_snapshot(snapshot)
+
+    def test_required_cuda_graph_fallback_and_unreported_auto_fail_closed(self):
+        required = _snapshot()
+        _add_cuda_metadata(required)
+        _add_cuda_graph_metadata(
+            required,
+            "required",
+            used=False,
+            reason="river-only",
+            eager=1000,
+            captures=0,
+            replays=0,
+        )
+        with self.assertRaisesRegex(RegressionError, "required CUDA Graph"):
+            validate_snapshot(required)
+
+        automatic = _snapshot()
+        automatic["configuration"]["cuda_graph_mode"] = "auto"
+        with self.assertRaisesRegex(RegressionError, "lacks per-solve"):
+            validate_snapshot(automatic)
+
+    def test_partial_nested_off_graph_telemetry_is_not_treated_as_legacy(self):
+        snapshot = _snapshot()
+        snapshot["configuration"]["cuda_graph_mode"] = "off"
+        snapshot["spots"][0]["cuda_graph"] = {
+            "warmups": [],
+            "summary": {"configured_mode": "off"},
+        }
+
+        with self.assertRaisesRegex(RegressionError, "incomplete per-solve"):
+            validate_snapshot(snapshot)
+
+    def test_comparison_surfaces_graph_modes_and_counts(self):
+        baseline = _snapshot()
+        candidate = copy.deepcopy(baseline)
+        _add_cuda_metadata(baseline)
+        _add_cuda_metadata(candidate)
+        _add_cuda_graph_metadata(
+            candidate,
+            "required",
+            used=True,
+            reason="enabled",
+            eager=6,
+            captures=2,
+            replays=994,
+        )
+
+        report = compare_snapshots(baseline, candidate, require_bitwise=True)
+
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["baseline_cuda_graph_mode"], "off")
+        self.assertEqual(report["candidate_cuda_graph_mode"], "required")
+        candidate_graph = report["spots"][0]["cuda_graph"]["candidate"]
+        self.assertTrue(candidate_graph["all_measured_used"])
+        self.assertEqual(candidate_graph["eager_iterations"], [6])
+        self.assertEqual(candidate_graph["captures"], [2])
+        self.assertEqual(candidate_graph["replays"], [994])
+
+    def test_repeat_hash_check_catches_signed_zero(self):
+        reference = {
+            "strategy": _tensor_payload(torch.tensor([0.0], dtype=torch.float32))
+        }
+        changed = {
+            "strategy": _tensor_payload(torch.tensor([-0.0], dtype=torch.float32))
+        }
+
+        self.assertEqual(
+            _output_hash_mismatches(reference, changed), ["strategy"]
+        )
+
     def test_preflop_chance_action_cfvs_are_quality_gated(self):
         baseline = _snapshot()
         candidate = _snapshot()
@@ -374,6 +505,59 @@ class SolverRegressionTest(unittest.TestCase):
         self.assertEqual(report["aggregate_timing"]["speedup"], 2.0)
         self.assertEqual(
             report["spots"][0]["argmax_actions"]["disagreements"], 0
+        )
+        self.assertTrue(
+            report["spots"][0]["bitwise"]["all_output_hashes_equal"]
+        )
+
+    def test_bitwise_gate_catches_signed_zero_with_zero_numeric_delta(self):
+        baseline = _snapshot()
+        candidate = copy.deepcopy(baseline)
+        changed = torch.tensor(
+            [[-1.0, -0.0, 1.0], [0.5, -0.5, 0.25]],
+            dtype=torch.float32,
+        )
+        _replace_tensor(candidate, "children_cfvs", changed)
+
+        numeric = compare_snapshots(
+            baseline,
+            candidate,
+            Thresholds(
+                max_strategy_abs_delta=0,
+                max_strategy_weighted_l1=0,
+                max_action_disagreement_weight=0,
+                max_action_disagreement_fraction=0,
+                max_cfv_abs_delta=0,
+                max_weighted_cfv_rmse=0,
+                max_root_ev_delta=0,
+            ),
+        )
+        bitwise = compare_snapshots(
+            baseline,
+            candidate,
+            Thresholds(
+                max_strategy_abs_delta=0,
+                max_strategy_weighted_l1=0,
+                max_action_disagreement_weight=0,
+                max_action_disagreement_fraction=0,
+                max_cfv_abs_delta=0,
+                max_weighted_cfv_rmse=0,
+                max_root_ev_delta=0,
+            ),
+            require_bitwise=True,
+        )
+
+        self.assertTrue(numeric["passed"])
+        self.assertFalse(bitwise["passed"])
+        self.assertEqual(
+            bitwise["spots"][0]["bitwise"]["mismatches"],
+            ["children_cfvs"],
+        )
+        self.assertTrue(
+            any(
+                "bitwise output hashes changed" in failure
+                for failure in bitwise["failures"]
+            )
         )
 
     def test_strategy_and_argmax_action_regression_fails(self):
@@ -440,6 +624,27 @@ class SolverRegressionTest(unittest.TestCase):
         snapshot["spots"][0]["tensors"]["strategy"]["values"][0] = 0.7
 
         with self.assertRaisesRegex(RegressionError, "fingerprint does not match"):
+            validate_snapshot(snapshot)
+
+    def test_stale_or_missing_raw_tensor_hash_is_rejected(self):
+        snapshot = _snapshot()
+        original_hash = snapshot["spots"][0]["tensors"]["children_cfvs"][
+            "sha256"
+        ]
+        changed = torch.tensor(
+            [[-1.0, -0.0, 1.0], [0.5, -0.5, 0.25]],
+            dtype=torch.float32,
+        )
+        _replace_tensor(snapshot, "children_cfvs", changed)
+        snapshot["spots"][0]["tensors"]["children_cfvs"][
+            "sha256"
+        ] = original_hash
+
+        with self.assertRaisesRegex(RegressionError, "raw tensor fingerprint"):
+            validate_snapshot(snapshot)
+
+        del snapshot["spots"][0]["tensors"]["children_cfvs"]["sha256"]
+        with self.assertRaisesRegex(RegressionError, "raw tensor fingerprint"):
             validate_snapshot(snapshot)
 
     def test_lfs_pointer_is_not_accepted_as_an_asset(self):

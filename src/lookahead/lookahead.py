@@ -89,6 +89,25 @@ class Lookahead(object):
         self.preflop_next_street_action_indices = None
         self.preflop_next_street_action_slots = {}
         self.preflop_next_street_input_count = 0
+        self._cuda_graph_handles = []
+        self._cuda_graph_stream = None
+        self.cuda_graph_telemetry = self._new_cuda_graph_telemetry()
+
+    @staticmethod
+    def _new_cuda_graph_telemetry():
+        mode = str(getattr(arguments, "cuda_graph_mode", "off"))
+        return {
+            "cuda_graph_mode": mode,
+            "cuda_graph_requested": mode != "off",
+            "cuda_graph_used": False,
+            "cuda_graph_reason": "not-run",
+            "cuda_graph_eager_iterations": 0,
+            "cuda_graph_captures": 0,
+            "cuda_graph_replays": 0,
+        }
+
+    def get_cuda_graph_telemetry(self):
+        return dict(self.cuda_graph_telemetry)
 
     # --- Constructs the lookahead from a game's public tree.
     # --
@@ -345,21 +364,201 @@ class Lookahead(object):
     def _compute(self):
         self._ensure_iteration_buffers()
 
-        # 1.0 main loop
-        for iteration in range(1, arguments.cfr_iters + 1):
-            self._set_opponent_starting_range()
-            self._compute_current_strategies()
-            self._compute_ranges()
-            self._compute_update_average_strategies(iteration)
-            self._compute_terminal_equities()
-            self._compute_cfvs()
-            self._compute_regrets()
-            self._compute_cumulate_average_cfvs(iteration)
+        mode = str(getattr(arguments, "cuda_graph_mode", "off")).lower()
+        if mode not in ("off", "auto", "required"):
+            raise RuntimeError(
+                "CUDA Graph mode must be off, auto, or required"
+            )
+        self.cuda_graph_telemetry = self._new_cuda_graph_telemetry()
+
+        if mode == "off":
+            self.cuda_graph_telemetry["cuda_graph_reason"] = "disabled"
+            self._compute_eager()
+        else:
+            reason = self._cuda_graph_ineligibility()
+            if reason is not None:
+                self.cuda_graph_telemetry["cuda_graph_reason"] = reason
+                if mode == "required":
+                    raise RuntimeError(
+                        "CUDA Graph execution was required but is ineligible: "
+                        + reason
+                    )
+                self._compute_eager()
+            else:
+                plan = self._cuda_graph_phase_plan(
+                    arguments.cfr_iters,
+                    arguments.cfr_skip_iters,
+                    getattr(arguments, "cuda_graph_eager_warmups", 3),
+                )
+                try:
+                    self._compute_with_cuda_graphs(plan)
+                except Exception as error:
+                    self.cuda_graph_telemetry["cuda_graph_reason"] = (
+                        "graph-failed:" + type(error).__name__
+                    )
+                    # Eager warmups have already mutated the live solver tensors.
+                    # Falling back here would mix partially-mutated solver state.
+                    raise RuntimeError(
+                        "CUDA Graph execution failed after solver mutation; "
+                        "the solve was aborted without eager fallback"
+                    ) from error
 
         # 2.0 at the end normalize average strategy
         self._compute_normalize_average_strategies()
         # 2.1 normalize root's CFVs
         self._compute_normalize_average_cfvs()
+
+    def _compute_iteration(self, iteration):
+        """Run one CFR iteration in the legacy operator order."""
+        self._set_opponent_starting_range()
+        self._compute_current_strategies()
+        self._compute_ranges()
+        self._compute_update_average_strategies(iteration)
+        self._compute_terminal_equities()
+        self._compute_cfvs()
+        self._compute_regrets()
+        self._compute_cumulate_average_cfvs(iteration)
+
+    def _compute_eager(self):
+        for iteration in range(1, arguments.cfr_iters + 1):
+            self._compute_iteration(iteration)
+        self.cuda_graph_telemetry["cuda_graph_eager_iterations"] = int(
+            arguments.cfr_iters
+        )
+
+    @staticmethod
+    def _cuda_graph_phase_plan(iterations, skip_iterations, eager_warmups=3):
+        if iterations < 1:
+            raise ValueError("CFR iterations must be positive")
+        if skip_iterations < 0 or skip_iterations >= iterations:
+            raise ValueError(
+                "CFR skip iterations must satisfy 0 <= skip < iterations"
+            )
+        if eager_warmups < 1:
+            raise ValueError("CUDA Graph eager warmups must be positive")
+
+        phases = []
+        for name, count, representative_iteration in (
+            ("burn-in", skip_iterations, 1),
+            (
+                "averaging",
+                iterations - skip_iterations,
+                skip_iterations + 1,
+            ),
+        ):
+            if count == 0:
+                continue
+            eager = min(count, eager_warmups)
+            remaining = count - eager
+            captures = 1 if remaining > 0 else 0
+            # Capture records kernels but does not execute a CFR iteration.
+            # Every non-eager iteration therefore requires an explicit replay.
+            replays = remaining
+            phases.append(
+                {
+                    "name": name,
+                    "iterations": count,
+                    "representative_iteration": representative_iteration,
+                    "eager_iterations": eager,
+                    "captures": captures,
+                    "replays": replays,
+                }
+            )
+        return phases
+
+    def _cuda_graph_ineligibility(self):
+        if not bool(arguments.use_gpu):
+            return "gpu-disabled"
+        if not torch.cuda.is_available():
+            return "cuda-unavailable"
+        if self.tree.street != constants.streets_count:
+            return "river-only"
+        if self.next_street_boxes is not None:
+            return "next-street-box-present"
+        if not hasattr(torch.cuda, "CUDAGraph") or not hasattr(
+            torch.cuda, "graph"
+        ):
+            return "cuda-graph-api-unavailable"
+        root_ranges = self.ranges_data.get(1)
+        if root_ranges is None or root_ranges.device.type != "cuda":
+            return "solver-tensors-not-cuda"
+        for name in ("equity_matrix", "fold_matrix"):
+            matrix = getattr(self.terminal_equity, name, None)
+            if matrix is None or matrix.device != root_ranges.device:
+                return "terminal-equity-device-mismatch"
+        if torch.cuda.is_current_stream_capturing():
+            return "nested-capture"
+        try:
+            plan = self._cuda_graph_phase_plan(
+                arguments.cfr_iters,
+                arguments.cfr_skip_iters,
+                getattr(arguments, "cuda_graph_eager_warmups", 3),
+            )
+        except ValueError as error:
+            return "invalid-phase-plan:" + str(error)
+        if not any(phase["captures"] for phase in plan):
+            return "too-few-iterations"
+        return None
+
+    def _compute_with_cuda_graphs(self, plan):
+        root_device = self.ranges_data[1].device
+        caller_stream = torch.cuda.current_stream(root_device)
+        graph_stream = torch.cuda.Stream(device=root_device)
+        graph_stream.wait_stream(caller_stream)
+        graphs = []
+        # Retain the side stream and every successfully captured private pool
+        # even if a later replay fails and the caller catches the exception.
+        self._cuda_graph_handles = graphs
+        self._cuda_graph_stream = graph_stream
+
+        try:
+            with torch.cuda.stream(graph_stream):
+                for phase in plan:
+                    representative = phase["representative_iteration"]
+                    for _ in range(phase["eager_iterations"]):
+                        self._compute_iteration(representative)
+
+                    if phase["captures"]:
+                        # PyTorch requires graph warmup to finish on the side
+                        # stream before capture begins. This also makes the state
+                        # boundary between burn-in and averaging explicit.
+                        graph_stream.synchronize()
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph, stream=graph_stream):
+                            self._compute_iteration(representative)
+                        graphs.append(graph)
+                        for _ in range(phase["replays"]):
+                            graph.replay()
+
+            # Surface asynchronous replay faults and make queued mutations safe
+            # before the method returns or graph-owned tensors can be released.
+            graph_stream.synchronize()
+        except Exception as error:
+            try:
+                graph_stream.synchronize()
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "CUDA Graph side-stream cleanup failed after "
+                    f"{type(error).__name__}; the CUDA context is unsafe to reuse"
+                ) from cleanup_error
+            raise
+
+        caller_stream.wait_stream(graph_stream)
+        self.cuda_graph_telemetry.update(
+            {
+                "cuda_graph_used": bool(graphs),
+                "cuda_graph_reason": "enabled",
+                "cuda_graph_eager_iterations": sum(
+                    phase["eager_iterations"] for phase in plan
+                ),
+                "cuda_graph_captures": sum(
+                    phase["captures"] for phase in plan
+                ),
+                "cuda_graph_replays": sum(
+                    phase["replays"] for phase in plan
+                ),
+            }
+        )
 
     def _ensure_iteration_buffers(self):
         """Allocate reduction outputs once instead of once per CFR iteration."""
@@ -575,8 +774,10 @@ class Lookahead(object):
             gp_layer_terminal_actions_count = self.terminal_actions_count[d - 2]
             ggp_layer_nonallin_bets_count = self.nonallinbets_count[d - 3]
 
-            self.cfvs_data[d][:, :, :, :, 0, :].mul_(self.empty_action_mask[d])
-            self.cfvs_data[d][:, :, :, :, 1, :].mul_(self.empty_action_mask[d])
+            # Apply the same legal-action mask to both player planes in one
+            # broadcasted operation. Each element still receives exactly one
+            # multiplication, while CUDA avoids a second launch per depth.
+            self.cfvs_data[d].mul_(self.empty_action_mask[d].unsqueeze(-2))
 
             self.placeholder_data[d].copy_(self.cfvs_data[d])
 

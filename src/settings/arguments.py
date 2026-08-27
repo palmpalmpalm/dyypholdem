@@ -1,3 +1,4 @@
+import os
 import sys
 
 import torch
@@ -68,6 +69,17 @@ resume_training = False
 """Section Torch"""
 # flag to use GPU for calculations
 use_gpu = True
+# CUDA Graph replay is experimental and remains opt-in until strict GPU A/B
+# validation has passed. "auto" falls back before computation when a solve is
+# ineligible; "required" fails instead of silently using the eager loop.
+cuda_graph_mode = os.environ.get(
+    "DYYPHOLDEM_CUDA_GRAPHS", "off"
+).strip().lower()
+if cuda_graph_mode not in ("off", "auto", "required"):
+    raise RuntimeError(
+        "DYYPHOLDEM_CUDA_GRAPHS must be off, auto, or required"
+    )
+cuda_graph_eager_warmups = 3
 # default tensor types
 if not use_gpu:
     Tensor = torch.FloatTensor

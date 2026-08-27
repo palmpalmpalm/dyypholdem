@@ -10,6 +10,7 @@ adds synchronized timings and memory telemetry when a compatible GPU exists.
 from __future__ import annotations
 
 import argparse
+from array import array
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -201,9 +202,212 @@ TIMING_FIELDS = (
     "resolve_total_seconds",
 )
 
+CUDA_GRAPH_FIELDS = (
+    "cuda_graph_mode",
+    "cuda_graph_requested",
+    "cuda_graph_used",
+    "cuda_graph_reason",
+    "cuda_graph_eager_iterations",
+    "cuda_graph_captures",
+    "cuda_graph_replays",
+)
+
 
 class RegressionError(RuntimeError):
     """Raised when a capture or comparison cannot be trusted."""
+
+
+def _expected_cuda_graph_counts(
+    iterations: int, skip_iterations: int, eager_warmups: int
+) -> tuple[int, int, int]:
+    """Return executed eager iterations, captures, and executed replays."""
+    eager = 0
+    captures = 0
+    replays = 0
+    for count in (skip_iterations, iterations - skip_iterations):
+        if count <= 0:
+            continue
+        phase_eager = min(count, eager_warmups)
+        phase_replays = count - phase_eager
+        eager += phase_eager
+        replays += phase_replays
+        captures += int(phase_replays > 0)
+    return eager, captures, replays
+
+
+def _legacy_off_cuda_graph_sample(iterations: int) -> dict[str, object]:
+    return {
+        "cuda_graph_mode": "off",
+        "cuda_graph_requested": False,
+        "cuda_graph_used": False,
+        "cuda_graph_reason": "disabled",
+        "cuda_graph_eager_iterations": int(iterations),
+        "cuda_graph_captures": 0,
+        "cuda_graph_replays": 0,
+    }
+
+
+def _cuda_graph_sample_from_timing(
+    timing: Mapping[str, object], configured_mode: str, iterations: int
+) -> dict[str, object]:
+    """Normalize one resolver timing sample, including legacy eager captures."""
+    if not any(
+        field in timing and timing.get(field) is not None
+        for field in CUDA_GRAPH_FIELDS
+    ):
+        if configured_mode == "off":
+            return _legacy_off_cuda_graph_sample(iterations)
+        return {
+            "cuda_graph_mode": configured_mode,
+            "cuda_graph_requested": configured_mode != "off",
+            "cuda_graph_used": False,
+            "cuda_graph_reason": "unreported",
+            "cuda_graph_eager_iterations": int(iterations),
+            "cuda_graph_captures": 0,
+            "cuda_graph_replays": 0,
+        }
+    return {field: timing.get(field) for field in CUDA_GRAPH_FIELDS}
+
+
+def _cuda_graph_summary(
+    configured_mode: str,
+    warmups: Sequence[Mapping[str, object]],
+    measured_repeats: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    all_samples = [*warmups, *measured_repeats]
+    return {
+        "configured_mode": configured_mode,
+        "warmup_samples": len(warmups),
+        "measured_samples": len(measured_repeats),
+        "all_samples_used": bool(all_samples)
+        and all(sample.get("cuda_graph_used") is True for sample in all_samples),
+        "all_measured_used": bool(measured_repeats)
+        and all(
+            sample.get("cuda_graph_used") is True
+            for sample in measured_repeats
+        ),
+        "reasons": sorted(
+            {str(sample.get("cuda_graph_reason")) for sample in all_samples}
+        ),
+        "eager_iterations": sorted(
+            {
+                int(sample["cuda_graph_eager_iterations"])
+                for sample in all_samples
+                if type(sample.get("cuda_graph_eager_iterations")) is int
+            }
+        ),
+        "captures": sorted(
+            {
+                int(sample["cuda_graph_captures"])
+                for sample in all_samples
+                if type(sample.get("cuda_graph_captures")) is int
+            }
+        ),
+        "replays": sorted(
+            {
+                int(sample["cuda_graph_replays"])
+                for sample in all_samples
+                if type(sample.get("cuda_graph_replays")) is int
+            }
+        ),
+    }
+
+
+def _cuda_graph_capture_payload(
+    configured_mode: str,
+    warmups: Sequence[Mapping[str, object]],
+    measured_repeats: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    warmup_rows = [dict(sample) for sample in warmups]
+    measured_rows = [dict(sample) for sample in measured_repeats]
+    return {
+        "warmups": warmup_rows,
+        "measured_repeats": measured_rows,
+        "summary": _cuda_graph_summary(
+            configured_mode, warmup_rows, measured_rows
+        ),
+    }
+
+
+def _cuda_graph_capture_view(
+    row: Mapping[str, object], configuration: Mapping[str, object]
+) -> dict[str, object]:
+    """Return normalized per-solve graph telemetry for new and eager legacy files."""
+    mode = str(configuration.get("cuda_graph_mode", "off"))
+    iterations = int(configuration.get("iterations", 0))
+    warmup_count = int(configuration.get("warmups", 0))
+    repeat_count = int(configuration.get("repeats", 0))
+    raw = row.get("cuda_graph")
+    nested_keys = ("warmups", "measured_repeats", "summary")
+    if (
+        isinstance(raw, Mapping)
+        and isinstance(raw.get("warmups"), list)
+        and isinstance(raw.get("measured_repeats"), list)
+    ):
+        if not all(
+            isinstance(sample, Mapping)
+            for sample in [*raw["warmups"], *raw["measured_repeats"]]
+        ):
+            raise RegressionError(
+                f"spot {row.get('name')} has malformed CUDA Graph samples"
+            )
+        warmups = [dict(sample) for sample in raw["warmups"]]
+        measured = [dict(sample) for sample in raw["measured_repeats"]]
+        return _cuda_graph_capture_payload(mode, warmups, measured)
+
+    if isinstance(raw, Mapping) and any(key in raw for key in nested_keys):
+        raise RegressionError(
+            f"spot {row.get('name')} has incomplete per-solve CUDA Graph telemetry"
+        )
+
+    # Older eager/off captures either omitted telemetry or stored only the final
+    # repeat. They remain comparable because graph execution was not requested.
+    if mode == "off" and (
+        raw is None
+        or (
+            isinstance(raw, Mapping)
+            and any(field in raw for field in CUDA_GRAPH_FIELDS)
+        )
+    ):
+        sample = (
+            _cuda_graph_sample_from_timing(raw, mode, iterations)
+            if isinstance(raw, Mapping)
+            else _legacy_off_cuda_graph_sample(iterations)
+        )
+        return _cuda_graph_capture_payload(
+            mode,
+            [sample for _ in range(warmup_count)],
+            [sample for _ in range(repeat_count)],
+        )
+
+    raise RegressionError(
+        f"spot {row.get('name')} lacks per-solve CUDA Graph telemetry for mode {mode}"
+    )
+
+
+def _output_hash_mismatches(
+    reference: Mapping[str, Mapping[str, object]],
+    output: Mapping[str, Mapping[str, object]],
+) -> list[str]:
+    return [
+        field
+        for field in output
+        if field not in reference
+        or reference[field].get("sha256") != output[field].get("sha256")
+    ]
+
+
+def _canonical_float32_sha256(
+    values: Sequence[object], nan_indices: Sequence[int]
+) -> str:
+    buffer = array("f", (float(value) for value in values))
+    if buffer.itemsize != 4:
+        raise RegressionError("platform float storage is not IEEE-754 float32")
+    for index in nan_indices:
+        buffer[int(index)] = float("nan")
+    if sys.byteorder != "little":
+        buffer.byteswap()
+    return hashlib.sha256(buffer.tobytes()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -727,13 +931,11 @@ def _tensor_payload(tensor, *, allow_nan: bool = False) -> dict[str, object]:
     if nan_indices and not allow_nan:
         raise RegressionError("solver returned a NaN in a required finite tensor")
     flat = value.reshape(-1)
-    raw = value.numpy().tobytes()
     finite = flat[torch.isfinite(flat)]
     serialized = torch.nan_to_num(flat, nan=0.0)
     payload = {
         "dtype": "float32",
         "shape": list(value.shape),
-        "sha256": hashlib.sha256(raw).hexdigest(),
         "min": float(finite.min().item()) if finite.numel() else None,
         "max": float(finite.max().item()) if finite.numel() else None,
         # ``children_cfvs`` uses NaN for structurally undefined action/hand
@@ -743,6 +945,9 @@ def _tensor_payload(tensor, *, allow_nan: bool = False) -> dict[str, object]:
         "nan_indices": [int(index) for index in nan_indices],
         "values": [float(item) for item in serialized.tolist()],
     }
+    payload["sha256"] = _canonical_float32_sha256(
+        payload["values"], payload["nan_indices"]
+    )
     payload["content_sha256"] = _json_sha256(
         {
             "dtype": payload["dtype"],
@@ -902,6 +1107,8 @@ def _spot_capture(
     source_root: Path,
     warmups: int,
     repeats: int,
+    iterations: int,
+    cuda_graph_mode: str,
     device: str = "cpu",
 ) -> dict[str, object]:
     import torch
@@ -925,10 +1132,13 @@ def _spot_capture(
 
     warmup_seconds = []
     warmup_memory = []
+    warmup_cuda_graph = []
     timing_samples: list[dict[str, float]] = []
     memory_samples: list[dict[str, int]] = []
+    measured_cuda_graph = []
     reference = None
     repeat_deltas = []
+    repeat_hash_mismatches = []
     resolver = None
     results = None
     for index in range(warmups + repeats):
@@ -952,14 +1162,20 @@ def _spot_capture(
             "achieved_cfvs": _tensor_payload(results.achieved_cfvs),
             "children_cfvs": _tensor_payload(results.children_cfvs, allow_nan=True),
         }
+        phase = dict(getattr(resolver, "last_timing", {}))
+        graph_sample = _cuda_graph_sample_from_timing(
+            phase, cuda_graph_mode, iterations
+        )
         if index < warmups:
             warmup_seconds.append(wall_seconds)
+            warmup_cuda_graph.append(graph_sample)
             if memory_sample is not None:
                 warmup_memory.append(memory_sample)
             continue
         if reference is None:
             reference = output
             repeat_deltas.append(0.0)
+            repeat_hash_mismatches.append([])
         else:
             repeat_deltas.append(
                 max(
@@ -967,18 +1183,25 @@ def _spot_capture(
                     for field in output
                 )
             )
-        phase = dict(getattr(resolver, "last_timing", {}))
+            repeat_hash_mismatches.append(
+                _output_hash_mismatches(reference, output)
+            )
         phase["wall_seconds"] = wall_seconds
         timing_samples.append({key: float(phase[key]) for key in TIMING_FIELDS})
+        measured_cuda_graph.append(graph_sample)
         if memory_sample is not None:
             memory_samples.append(memory_sample)
 
     if reference is None or resolver is None or results is None:
         raise RegressionError(f"spot {name} produced no measured result")
-    if max(repeat_deltas, default=0.0) != 0.0:
+    if any(repeat_hash_mismatches):
         raise RegressionError(
-            f"spot {name} was not bit-identical across repeats; "
-            f"max delta={max(repeat_deltas):.9g}"
+            f"spot {name} raw tensor hashes changed across repeats: "
+            + "; ".join(
+                f"repeat {index}: {', '.join(fields)}"
+                for index, fields in enumerate(repeat_hash_mismatches)
+                if fields
+            )
         )
 
     chance_action_cfvs = None
@@ -1031,6 +1254,9 @@ def _spot_capture(
             "phases": phase_summary,
             "median_wall_seconds": phase_summary["wall_seconds"]["median"],
         },
+        "cuda_graph": _cuda_graph_capture_payload(
+            cuda_graph_mode, warmup_cuda_graph, measured_cuda_graph
+        ),
     }
     if chance_action_cfvs is not None:
         row["chance_action_cfvs"] = chance_action_cfvs
@@ -1081,6 +1307,7 @@ def capture_snapshot(
     seed: int,
     threads: int,
     device: str = "cpu",
+    cuda_graph_mode: str = "off",
 ) -> dict[str, object]:
     if iterations < 2:
         raise RegressionError("iterations must be at least 2")
@@ -1092,6 +1319,10 @@ def capture_snapshot(
         )
     if device not in ("cpu", "cuda"):
         raise RegressionError("device must be cpu or cuda")
+    if cuda_graph_mode not in ("off", "auto", "required"):
+        raise RegressionError(
+            "cuda graph mode must be off, auto, or required"
+        )
 
     source_root = source_root.resolve()
     asset_root = asset_root.resolve()
@@ -1107,6 +1338,7 @@ def capture_snapshot(
     os.chdir(runtime_dir)
     sys.path.insert(0, str(source_dir))
     os.environ["DYYPHOLDEM_COMPACT_MODEL_PATH"] = str(model_root)
+    os.environ["DYYPHOLDEM_CUDA_GRAPHS"] = cuda_graph_mode
 
     import torch
     import settings.arguments as arguments
@@ -1122,6 +1354,7 @@ def capture_snapshot(
     arguments.value_net_name = "final_gpu" if device == "cuda" else "final_cpu"
     arguments.cfr_iters = iterations
     arguments.cfr_skip_iters = skip_iterations
+    arguments.cuda_graph_mode = cuda_graph_mode
     torch.set_num_threads(threads)
     torch.manual_seed(seed)
     if device == "cuda":
@@ -1135,7 +1368,16 @@ def capture_snapshot(
     started = time.perf_counter()
     try:
         spots = [
-            _spot_capture(name, SPOTS[name], source_root, warmups, repeats, device)
+            _spot_capture(
+                name,
+                SPOTS[name],
+                source_root,
+                warmups,
+                repeats,
+                iterations,
+                cuda_graph_mode,
+                device,
+            )
             for name in spot_names
         ]
     except RuntimeError as exc:
@@ -1204,6 +1446,10 @@ def capture_snapshot(
             "repeats": repeats,
             "seed": seed,
             "threads": threads,
+            "cuda_graph_mode": cuda_graph_mode,
+            "cuda_graph_eager_warmups": int(
+                getattr(arguments, "cuda_graph_eager_warmups", 3)
+            ),
             "spots": list(spot_names),
             "suite_sha256": _json_sha256([(name, SPOTS[name]) for name in spot_names]),
         },
@@ -1229,6 +1475,7 @@ def capture_snapshot(
                 for row in spots
             ),
         }
+    validate_snapshot(snapshot)
     return snapshot
 
 
@@ -1258,6 +1505,9 @@ def _validate_tensor_payload(
         raise RegressionError(f"{label} has an invalid NaN mask")
     if normalized and not allow_nan_mask:
         raise RegressionError(f"{label} unexpectedly contains masked NaNs")
+    expected_raw_sha256 = _canonical_float32_sha256(values, normalized)
+    if payload.get("sha256") != expected_raw_sha256:
+        raise RegressionError(f"{label} raw tensor fingerprint does not match")
     expected_content_sha256 = _json_sha256(
         {
             "dtype": payload["dtype"],
@@ -1305,6 +1555,129 @@ def _validate_cuda_memory_summary(summary: object, label: str) -> None:
         value = summary.get(key)
         if not isinstance(value, int) or value < 0:
             raise RegressionError(f"{label}.{key} is not a nonnegative integer")
+
+
+def _validate_cuda_graph_sample(
+    sample: object,
+    label: str,
+    *,
+    configured_mode: str,
+    device: str,
+    street: int,
+    iterations: int,
+    skip_iterations: int,
+    eager_warmups: int,
+) -> None:
+    if not isinstance(sample, Mapping):
+        raise RegressionError(f"{label} is missing CUDA Graph telemetry")
+    mode = sample.get("cuda_graph_mode")
+    requested = sample.get("cuda_graph_requested")
+    used = sample.get("cuda_graph_used")
+    reason = sample.get("cuda_graph_reason")
+    if mode != configured_mode:
+        raise RegressionError(
+            f"{label}.cuda_graph_mode {mode!r} does not match {configured_mode!r}"
+        )
+    if type(requested) is not bool or requested is not (configured_mode != "off"):
+        raise RegressionError(f"{label} has invalid CUDA Graph requested telemetry")
+    if type(used) is not bool:
+        raise RegressionError(f"{label} has invalid CUDA Graph used telemetry")
+    if not isinstance(reason, str) or not reason:
+        raise RegressionError(f"{label} has invalid CUDA Graph reason telemetry")
+    counts = []
+    for field in (
+        "cuda_graph_eager_iterations",
+        "cuda_graph_captures",
+        "cuda_graph_replays",
+    ):
+        value = sample.get(field)
+        if type(value) is not int or value < 0:
+            raise RegressionError(f"{label}.{field} is not a nonnegative integer")
+        counts.append(value)
+    eager, captures, replays = counts
+    if eager + replays != iterations:
+        raise RegressionError(
+            f"{label} executed {eager + replays} CFR iterations; expected {iterations}"
+        )
+
+    if configured_mode == "off":
+        if used or reason != "disabled" or captures != 0 or replays != 0:
+            raise RegressionError(f"{label} is not valid eager/off telemetry")
+        return
+
+    if not used:
+        if configured_mode == "required":
+            raise RegressionError(f"{label} required CUDA Graph execution but fell back")
+        if reason in ("enabled", "unreported") or captures != 0 or replays != 0:
+            raise RegressionError(f"{label} has an invalid CUDA Graph fallback")
+        return
+
+    if device != "cuda" or street != 4:
+        raise RegressionError(f"{label} used CUDA Graphs outside a CUDA river solve")
+    if reason != "enabled":
+        raise RegressionError(f"{label} used CUDA Graphs without reason=enabled")
+    expected = _expected_cuda_graph_counts(
+        iterations, skip_iterations, eager_warmups
+    )
+    if (eager, captures, replays) != expected:
+        raise RegressionError(
+            f"{label} CUDA Graph counts {(eager, captures, replays)!r} "
+            f"do not match expected {expected!r}"
+        )
+
+
+def _validate_cuda_graph_capture(
+    row: Mapping[str, object],
+    configuration: Mapping[str, object],
+    device: str,
+) -> dict[str, object]:
+    mode = str(configuration.get("cuda_graph_mode", "off"))
+    if mode not in ("off", "auto", "required"):
+        raise RegressionError(f"snapshot has unsupported CUDA Graph mode {mode!r}")
+    iterations = int(configuration.get("iterations", 0))
+    skip_iterations = int(configuration.get("skip_iterations", -1))
+    eager_warmups = int(configuration.get("cuda_graph_eager_warmups", 3))
+    warmup_count = int(configuration.get("warmups", 0))
+    repeat_count = int(configuration.get("repeats", 0))
+    if (
+        iterations < 1
+        or skip_iterations < 0
+        or skip_iterations >= iterations
+        or eager_warmups < 1
+    ):
+        raise RegressionError("snapshot has invalid CUDA Graph phase configuration")
+    capture = _cuda_graph_capture_view(row, configuration)
+    warmups = capture.get("warmups")
+    measured = capture.get("measured_repeats")
+    if not isinstance(warmups, list) or len(warmups) != warmup_count:
+        raise RegressionError(
+            f"spot {row.get('name')} CUDA Graph warmups do not match configuration"
+        )
+    if not isinstance(measured, list) or len(measured) != repeat_count:
+        raise RegressionError(
+            f"spot {row.get('name')} CUDA Graph repeats do not match configuration"
+        )
+    street = int(row.get("spec", {}).get("street", 0))
+    for kind, samples in (("warmup", warmups), ("repeat", measured)):
+        for index, sample in enumerate(samples):
+            _validate_cuda_graph_sample(
+                sample,
+                f"{row.get('name')}.{kind}[{index}].cuda_graph",
+                configured_mode=mode,
+                device=device,
+                street=street,
+                iterations=iterations,
+                skip_iterations=skip_iterations,
+                eager_warmups=eager_warmups,
+            )
+
+    raw = row.get("cuda_graph")
+    if isinstance(raw, Mapping) and "summary" in raw:
+        if raw.get("summary") != capture.get("summary"):
+            raise RegressionError(
+                f"spot {row.get('name')} CUDA Graph summary does not match samples"
+            )
+    return capture
 
 
 def _validate_chance_action_cfvs(row: Mapping[str, object], device: str) -> None:
@@ -1376,13 +1749,16 @@ def validate_snapshot(snapshot: Mapping[str, object]) -> None:
         raise RegressionError("not a DyypHoldem solver-regression capture")
     if not bool(snapshot.get("preflight", {}).get("verified")):
         raise RegressionError("snapshot records an unverified preflight")
-    configured = snapshot.get("configuration", {}).get("spots")
+    configuration = snapshot.get("configuration")
+    if not isinstance(configuration, Mapping):
+        raise RegressionError("snapshot is missing configuration metadata")
+    configured = configuration.get("spots")
     rows = snapshot.get("spots")
     if not isinstance(configured, list) or not isinstance(rows, list):
         raise RegressionError("snapshot is missing configured spots")
     if configured != [row.get("name") for row in rows]:
         raise RegressionError("configured spots do not match captured rows")
-    device = str(snapshot.get("configuration", {}).get("device", "cpu"))
+    device = str(configuration.get("device", "cpu"))
     if device not in ("cpu", "cuda"):
         raise RegressionError(f"snapshot has unsupported device {device!r}")
     if device == "cuda":
@@ -1439,6 +1815,7 @@ def validate_snapshot(snapshot: Mapping[str, object]) -> None:
             )
         if not bool(row.get("timing", {}).get("bit_identical_repeats")):
             raise RegressionError(f"spot {row.get('name')} is nondeterministic")
+        _validate_cuda_graph_capture(row, configuration, device)
         if int(row.get("spec", {}).get("street", 0)) == 1:
             _validate_chance_action_cfvs(row, device)
         if device == "cuda":
@@ -1512,6 +1889,11 @@ def _spot_metrics(
             raise RegressionError(
                 f"input {range_field} changed for {baseline.get('name')}"
             )
+    bitwise_mismatches = [
+        field
+        for field in ("strategy", *CFV_FIELDS)
+        if bt[field].get("sha256") != ct[field].get("sha256")
+    ]
 
     strategy_shape = bt["strategy"]["shape"]
     if strategy_shape != ct["strategy"]["shape"] or len(strategy_shape) != 3:
@@ -1590,6 +1972,15 @@ def _spot_metrics(
             tensor_delta = _tensor_max_delta(
                 baseline_action["tensor"], candidate_action["tensor"]
             )
+            tensor_hash_equal = (
+                baseline_action["tensor"].get("sha256")
+                == candidate_action["tensor"].get("sha256")
+            )
+            if not tensor_hash_equal:
+                bitwise_mismatches.append(
+                    "chance_action_cfvs:"
+                    + ":".join(str(value) for value in key)
+                )
             differences = [
                 float(right) - float(left)
                 for left, right in zip(
@@ -1618,6 +2009,7 @@ def _spot_metrics(
                     "lookahead_index": key[3],
                     "max_abs_delta": tensor_delta,
                     "range_weighted_rmse": weighted_rmse,
+                    "tensor_hash_equal": tensor_hash_equal,
                     "baseline_seconds": baseline_call_seconds,
                     "candidate_seconds": candidate_call_seconds,
                     "runtime_ratio": (
@@ -1704,6 +2096,10 @@ def _spot_metrics(
             "root_ev_delta": root_ev_delta,
             "achieved_ev_delta": achieved_ev_delta,
         },
+        "bitwise": {
+            "all_output_hashes_equal": not bitwise_mismatches,
+            "mismatches": bitwise_mismatches,
+        },
         "timing": {
             "baseline_median_seconds": baseline_seconds,
             "candidate_median_seconds": candidate_seconds,
@@ -1736,6 +2132,7 @@ def compare_snapshots(
     *,
     allow_iteration_change: bool = False,
     allow_environment_change: bool = False,
+    require_bitwise: bool = False,
 ) -> dict[str, object]:
     validate_snapshot(baseline)
     validate_snapshot(candidate)
@@ -1776,7 +2173,23 @@ def compare_snapshots(
     spot_metrics = []
     for name in baseline_config["spots"]:
         metrics = _spot_metrics(baseline_rows[name], candidate_rows[name])
+        metrics["cuda_graph"] = {
+            "baseline": _cuda_graph_capture_view(
+                baseline_rows[name], baseline_config
+            )["summary"],
+            "candidate": _cuda_graph_capture_view(
+                candidate_rows[name], candidate_config
+            )["summary"],
+        }
         spot_metrics.append(metrics)
+        if (
+            require_bitwise
+            and not metrics["bitwise"]["all_output_hashes_equal"]
+        ):
+            failures.append(
+                f"{name}: bitwise output hashes changed: "
+                + ", ".join(metrics["bitwise"]["mismatches"])
+            )
         checks = (
             (
                 metrics["strategy"]["max_abs_delta"],
@@ -1851,6 +2264,13 @@ def compare_snapshots(
         "candidate_source": candidate.get("source"),
         "baseline_iterations": baseline_config.get("iterations"),
         "candidate_iterations": candidate_config.get("iterations"),
+        "baseline_cuda_graph_mode": baseline_config.get(
+            "cuda_graph_mode", "off"
+        ),
+        "candidate_cuda_graph_mode": candidate_config.get(
+            "cuda_graph_mode", "off"
+        ),
+        "require_bitwise": require_bitwise,
         "thresholds": thresholds.__dict__,
         "spots": spot_metrics,
         "aggregate_timing": {
@@ -1935,6 +2355,12 @@ def build_parser() -> argparse.ArgumentParser:
     capture_parser.add_argument("--repeats", type=int, default=3)
     capture_parser.add_argument("--seed", type=int, default=0)
     capture_parser.add_argument("--threads", type=int, default=1)
+    capture_parser.add_argument(
+        "--cuda-graphs",
+        choices=("off", "auto", "required"),
+        default="off",
+        help="river CUDA Graph mode (default: off)",
+    )
     capture_parser.add_argument("--output", type=Path, required=True)
 
     compare_parser = subparsers.add_parser(
@@ -1945,6 +2371,11 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--output", type=Path)
     compare_parser.add_argument("--allow-iteration-change", action="store_true")
     compare_parser.add_argument("--allow-environment-change", action="store_true")
+    compare_parser.add_argument(
+        "--require-bitwise",
+        action="store_true",
+        help="require raw float32 tensor SHA-256 equality",
+    )
     compare_parser.add_argument("--max-strategy-abs-delta", type=float, default=1e-6)
     compare_parser.add_argument(
         "--max-strategy-weighted-l1", type=float, default=1e-6
@@ -2002,6 +2433,7 @@ def main() -> int:
                 args.seed,
                 args.threads,
                 args.device,
+                args.cuda_graphs,
             )
             _write_json(args.output, payload)
             print(
@@ -2028,6 +2460,7 @@ def main() -> int:
                                 "root_cfvs_sha256": row["tensors"]["root_cfvs"][
                                     "sha256"
                                 ],
+                                "cuda_graph": row["cuda_graph"]["summary"],
                                 **(
                                     {"cuda_memory": row["cuda_memory"]}
                                     if args.device == "cuda"
@@ -2071,6 +2504,7 @@ def main() -> int:
             thresholds,
             allow_iteration_change=args.allow_iteration_change,
             allow_environment_change=args.allow_environment_change,
+            require_bitwise=args.require_bitwise,
         )
         if args.output:
             _write_json(args.output, payload)
