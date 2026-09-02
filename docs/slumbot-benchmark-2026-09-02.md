@@ -138,6 +138,55 @@ the remaining CFR launch overhead.
 Sizing rule of thumb until those fixes are measured: at 8.7 s/hand aggregate
 a six-hour guard covers about 2,400 hands after setup.
 
+### Run `dyypholdem-slumbot-20260902T092737Z`: wide opponent menu, graphs, MPS
+
+Four sessions, 2,400 hands, all complete with zero errors. Solver changes
+relative to the previous run: `DYYPHOLDEM_OPPONENT_BET_SIZING=0.5,1,2`, CUDA
+Graph replay in `auto` mode after the on-pod gate passed, NVIDIA MPS started,
+and 16 CPU threads per session on a 64-vCPU pod. Graph replay is bit-identical
+to the eager solver, so the only quality change between the two runs is the
+opponent bet menu.
+
+| Metric | Default tree (previous run) | Wide opponent menu |
+|---|---:|---:|
+| Hands | 2,443 | 2,400 |
+| Net chips | +15,150 | −120,100 |
+| Result | +62.0 mbb/hand, 95% CI ±632 | −500.4 mbb/hand, 95% CI ±628 |
+| Small blind hands (chips) | 1,220 (+49,100) | 1,200 (−400) |
+| Big blind hands (chips) | 1,223 (−33,950) | 1,200 (−119,700) |
+| Pots of 5,000+ chips | 32 hands, +58,900 | 37 hands, −66,600 |
+| Fold share of decisions | 12.8% | 16.0% |
+| Hands won / lost / tied | 1,256 / 1,161 / 26 | 1,098 / 1,275 / 27 |
+
+The difference of −562 mbb/hand carries a combined standard error of about
+455, so it is not significant at 95%, but everything about it points the same
+way: the loss is concentrated in the big blind, the seat that checks to the
+opponent postflop and therefore faces exactly the widened opponent bets, and
+the big-pot slice this menu was meant to repair got worse. The bot also folds
+more often. The most likely mechanism is not the tree itself but the value
+networks: they were trained on situations generated with the pot-only tree,
+so the leaf ranges produced by a wider opponent menu are out of distribution
+for them. A fair test of a richer abstraction therefore needs the networks
+retrained under the same abstraction, which is the retraining item of the
+roadmap and a separate budget decision. The menu stays off by default and is
+not used by the following runs.
+
+Runtime under graph replay, four concurrent sessions:
+
+| Street | Decisions | Response mean | p95 | CFR mean |
+|---|---:|---:|---:|---:|
+| preflop | 2,600 | 0.466 s | 1.324 s | 0.419 s |
+| flop | 1,935 | 3.530 s | 4.915 s | 1.899 s |
+| turn | 1,204 | 2.229 s | 3.220 s | 1.332 s |
+| river | 886 | 0.665 s | 1.218 s | 0.577 s |
+
+Aggregate pace was 1.7 s/hand (4,154 s for 2,400 hands), five times the
+previous four-session run and seven times the solo run, with 5,425 of 6,625
+decisions replaying graphs (the rest were cached-root preflop decisions that
+do not solve). Lookahead construction is now the largest non-CFR cost on the
+flop and turn. At this pace a 100,000-hand Slumbot evaluation is about 47
+GPU-hours, roughly $35, against the $245 estimated after the first run.
+
 ## Reading the result
 
 Slumbot reports winnings from the client's perspective in chips. With a
