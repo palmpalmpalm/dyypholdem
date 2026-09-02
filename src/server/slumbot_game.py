@@ -226,8 +226,17 @@ class SlumbotGame(object):
 
         raise_to = int(advised_action.raise_amount)
         street_last_bet_to = int(state["street_last_bet_to"])
-        previous_streets = int(state["total_last_bet_to"]) - street_last_bet_to
-        remaining = STACK_SIZE - street_last_bet_to
+        total_last_bet_to = int(state["total_last_bet_to"])
+        previous_streets = total_last_bet_to - street_last_bet_to
+        # Chips a player may still add on top of the current street level. This
+        # must subtract everything already committed in earlier streets, not
+        # just this street's level: a player who put 5,400 in preflop and on
+        # the flop has 14,600 behind, so the largest legal turn bet-to is
+        # 14,600, and an all-in that lands under the minimum raise is still
+        # legal. Slumbot's published parser writes STACK_SIZE minus the
+        # street-local level here, which both over-allows big bets and, worse,
+        # rejects the short all-in raise the live server itself sends.
+        remaining = STACK_SIZE - total_last_bet_to
         if remaining <= 0:
             raise SlumbotProtocolError("DyypHoldem tried to raise with no chips behind")
         last_bet_size = int(state["last_bet_size"])
@@ -428,8 +437,13 @@ class SlumbotGame(object):
                 except (TypeError, ValueError):
                     return {'error': 'Bet size not an integer'}
                 new_last_bet_size = new_street_last_bet_to - street_last_bet_to
-                # Validate that the bet is legal
-                remaining = STACK_SIZE - street_last_bet_to
+                # Validate that the bet is legal. ``remaining`` is what the
+                # bettor may still add above the current street level, so it
+                # subtracts every chip committed so far this hand (see the note
+                # in encode_action); the published reference parser subtracts
+                # only the street-local level and therefore rejects a legal
+                # all-in under-raise on a later street.
+                remaining = STACK_SIZE - total_last_bet_to
                 if last_bet_size > 0:
                     min_bet_size = last_bet_size
                     # Make sure minimum opening bet is the size of the big blind.

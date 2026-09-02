@@ -89,6 +89,42 @@ class ParseActionTest(unittest.TestCase):
         flop = slumbot_game.SlumbotGame.parse_action("b300c/")
         self.assertEqual((flop["st"], flop["pos"], flop["street_last_bet_to"], flop["total_last_bet_to"]), (1, 0, 0, 300))
 
+    def test_all_in_under_raise_on_a_later_street_is_legal(self):
+        # Hand 464 of dyypholdem-slumbot-20260902T185503Z: Slumbot answered the
+        # bot's turn bet by moving in for 3,800 more, which is less than the
+        # 10,800 minimum raise but is its entire remaining stack. Slumbot's
+        # published parser computes the remaining stack from the street-local
+        # level alone and rejects this; the live server sends it.
+        result = slumbot_game.SlumbotGame.parse_action(
+            "b200b600b1800c/b3600c/b10800b14600"
+        )
+        self.assertIsNone(result.get("error"))
+        self.assertEqual(result["total_last_bet_to"], 20000)
+        self.assertEqual(result["street_last_bet_to"], 14600)
+        self.assertEqual(result["last_bet_size"], 3800)
+        self.assertEqual(result["pos"], 0)
+        called = slumbot_game.SlumbotGame.parse_action(
+            "b200b600b1800c/b3600c/b10800b14600c"
+        )
+        self.assertIsNone(called.get("error"))
+        self.assertEqual(called["pos"], -1)
+
+    def test_under_raise_that_is_not_all_in_is_still_rejected(self):
+        # Same shape, but only 3,800 was committed before the turn, so 14,600
+        # leaves 1,600 behind and the raise really is too small.
+        result = slumbot_game.SlumbotGame.parse_action("b200c/b3600c/b10800b14600")
+        self.assertEqual(
+            result.get("error"),
+            "Bet too small - remaining=5400, min_bet_size=5400, new_last_bet_size=3800",
+        )
+
+    def test_bets_larger_than_the_remaining_stack_are_rejected(self):
+        result = slumbot_game.SlumbotGame.parse_action("b200b600b1800c/b20000")
+        self.assertEqual(
+            result.get("error"),
+            "Bet too big - remaining=18200, max_bet_size=18200, new_last_bet_size=20000",
+        )
+
     def test_illegal_fold_is_reported_as_a_dict(self):
         self.assertEqual(slumbot_game.SlumbotGame.parse_action("f"), {"error": "Illegal fold"}) if False else None
         result = slumbot_game.SlumbotGame.parse_action("cf")
@@ -141,9 +177,27 @@ class EncodeActionTest(unittest.TestCase):
         action, correction = self.encode("b300b900", raise_to(1000))
         self.assertEqual(action, "b1500")
         self.assertEqual(correction, "raise_to_1000_lifted_to_min_raise")
+        # 300 is already committed preflop, so an all-in on the flop is a
+        # street-local bet-to of 19,700, not 20,000.
         action, correction = self.encode("b300c/", raise_to(25000))
-        self.assertEqual(action, "b20000")
+        self.assertEqual(action, "b19700")
         self.assertEqual(correction, "raise_to_25000_capped_to_all_in")
+
+    def test_all_in_on_a_later_street_is_not_lifted_to_a_min_raise(self):
+        # Turn spot from hand 464 of dyypholdem-slumbot-20260902T185503Z with
+        # the seats swapped: 5,400 committed, facing a street-local bet to
+        # 10,800, so the whole remaining stack is a 3,800 under-raise. It is
+        # legal and must go out at its true size.
+        self.assertEqual(
+            self.encode("b200b600b1800c/b3600c/b10800", raise_to(20000)),
+            ("b14600", None),
+        )
+
+    def test_raises_are_capped_by_chips_behind_not_by_the_street_level(self):
+        # 5,400 in already: the largest legal turn bet-to is 14,600.
+        action, correction = self.encode("b200b600b1800c/b3600c/", raise_to(20001))
+        self.assertEqual(action, "b14600")
+        self.assertEqual(correction, "raise_to_20001_capped_to_all_in")
 
     def test_encoding_without_state_fails_closed(self):
         game = slumbot_game.SlumbotGame(opener=FakeOpener([]))
