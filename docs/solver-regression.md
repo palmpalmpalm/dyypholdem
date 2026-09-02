@@ -353,6 +353,33 @@ iterations still sit 2-3% of range-weighted argmax decisions away from the
 4,000-iteration solve on every non-river node, which is where time saved by
 CUDA Graph replay could go.
 
+### 2026-09-02 Doubling The Iteration Count
+
+Same 4,000-iteration CFR+ reference as the variant probe, comparing the
+production 1,000/500 setting with 2,000/1,000. Range-weighted root-strategy
+L1 and range-weighted argmax disagreement:
+
+| Node | 1000/500 | 2000/1000 |
+|---|---|---|
+| preflop-root | 0.1433 / 2.71% | 0.0507 / 2.71% |
+| flop-3cAdKc | 0.0895 / 3.79% | 0.0381 / 1.77% |
+| turn-3c5h4h3h | 0.0741 / 3.60% | 0.0258 / 2.14% |
+| river-7d7c8s5sQd | 0.0191 / 1.88% | 0.0054 / 0.00% |
+
+Doubling the iterations cuts the strategy distance to the reference by about
+three times on every node and roughly halves the argmax disagreement on the
+three postflop nodes; the preflop argmax figure is unchanged, which fits a
+root whose action set is small and whose disagreements sit on near-indifferent
+hands. This is a real convergence gain, and CUDA Graph replay is what makes it
+affordable: a graphed 2,000-iteration solve still costs less wall time than
+the old eager 1,000-iteration solve on every street.
+
+Whether it is a *playing-strength* gain is a separate question, and the
+Slumbot benchmark cannot answer it: 2,400 hands carry a 95% interval near
+±630 mbb/hand, far wider than any plausible effect. The low-variance
+fold-or-call local best response is the sensitive instrument for this, run
+twice on the same dealer seed so the two matches see the same cards.
+
 ## Iteration Sweeps
 
 Iteration changes are rejected unless explicitly acknowledged. Capture each
