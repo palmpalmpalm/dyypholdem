@@ -164,6 +164,21 @@ class RunPlayUiLauncherTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
 
+    def test_gate_iteration_fallback_tracks_the_shipped_default(self):
+        """The on-pod gate must validate the iteration count the match runs."""
+        import re
+
+        source = LAUNCHER.read_text()
+        fallback = re.search(r"^DEFAULT_CFR_ITERS=(\d+)$", source, re.MULTILINE)
+        self.assertIsNotNone(fallback, "launcher has no DEFAULT_CFR_ITERS")
+        shipped = re.search(
+            r'_positive_int_env\("DYYPHOLDEM_CFR_ITERS", (\d+)\)',
+            (PROJECT_ROOT / "src" / "settings" / "arguments.py").read_text(),
+        )
+        self.assertIsNotNone(shipped, "arguments.py has no default iteration count")
+        self.assertEqual(fallback.group(1), shipped.group(1))
+        self.assertNotIn("${CFR_ITERS:-1000}", source)
+
     def test_cfr_iteration_knob_is_reported_and_validated(self):
         env = os.environ.copy()
         env.update({"DYYPHOLDEM_UI_OPPONENT": "slumbot", "DYYPHOLDEM_CFR_ITERS": "2000"})
@@ -171,7 +186,7 @@ class RunPlayUiLauncherTests(unittest.TestCase):
         self.assertIn("CFR iterations: 2000 with half skipped", result.stdout)
         self.assertIn("2000 CFR iterations", result.stdout)
         default = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True)
-        self.assertIn("CFR iterations: 1000 with half skipped", default.stdout)
+        self.assertIn("CFR iterations: 2000 with half skipped", default.stdout)
         for overrides, message in (
             ({"DYYPHOLDEM_CFR_ITERS": "lots"}, "DYYPHOLDEM_CFR_ITERS"),
             ({"DYYPHOLDEM_CFR_ITERS": "2000", "DYYPHOLDEM_CFR_SKIP_ITERS": "2000"}, "must be smaller than"),
