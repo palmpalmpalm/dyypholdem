@@ -1002,7 +1002,7 @@ fi
 if [ "$SLUMBOT_MODE" = 1 ]; then
   if [ "$LBR_MODE" = 1 ]; then
     echo "starting dealer, strategy-publishing resolver, and local best response"
-    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_LBR_RAISE_MENU='$LBR_RAISE_MENU' DYYPHOLDEM_CFR_ITERS='$CFR_ITERS' DYYPHOLDEM_CFR_SKIP_ITERS='$CFR_SKIP_ITERS'; cd /root/dyypholdem && ./scripts/start_lbr_remote.sh '$RUN_NAME' '$HANDS' '$SEED'"
+    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_LBR_RAISE_MENU='$LBR_RAISE_MENU' DYYPHOLDEM_LBR_DEVICE='${DYYPHOLDEM_LBR_DEVICE:-cpu}' DYYPHOLDEM_CFR_ITERS='$CFR_ITERS' DYYPHOLDEM_CFR_SKIP_ITERS='$CFR_SKIP_ITERS'; cd /root/dyypholdem && ./scripts/start_lbr_remote.sh '$RUN_NAME' '$HANDS' '$SEED'"
   else
     echo "starting real continual resolver against Slumbot"
     "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_UI_MPS='$MPS' DYYPHOLDEM_CFR_ITERS='$CFR_ITERS' DYYPHOLDEM_CFR_SKIP_ITERS='$CFR_SKIP_ITERS'; cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED' '$SESSIONS'"

@@ -17,6 +17,15 @@ SEED="$3"
 RUN_DIR="$PROJECT_DIR/runs/play-ui/$RUN_NAME"
 SESSION_DIR="$RUN_DIR/session-0"
 LBR_RAISE_MENU="${DYYPHOLDEM_LBR_RAISE_MENU:-pot,all_in}"
+# LBR rebuilds a terminal-equity matrix for every new public board, which on
+# the flop averages 1,081 river runouts. On CPU that measured ~15 s per new
+# flop against the bot's 2.7 s decision; the pod's GPU is mostly idle while
+# LBR thinks, so "cuda" is available for future runs.
+LBR_DEVICE="${DYYPHOLDEM_LBR_DEVICE:-cpu}"
+case "$LBR_DEVICE" in
+  cpu|cuda) ;;
+  *) echo "DYYPHOLDEM_LBR_DEVICE must be cpu or cuda" >&2; exit 2 ;;
+esac
 
 case "$RUN_NAME" in
   *[!A-Za-z0-9._-]*|'') echo "invalid run name" >&2; exit 2 ;;
@@ -50,7 +59,7 @@ echo "$!" > "$RUN_DIR/dealer.pid"
 
 cd "$PROJECT_DIR/src"
 # The LBR opponent connects first so the bot's seat (18902) is the one still open.
-DYYPHOLDEM_DEVICE=cpu setsid nohup python3 player/lbr_acpc_player.py 127.0.0.1 18901 \
+DYYPHOLDEM_DEVICE="$LBR_DEVICE" setsid nohup python3 player/lbr_acpc_player.py 127.0.0.1 18901 \
   --hands "$HANDS" \
   --strategy-channel "$SESSION_DIR/bot-strategy.jsonl" \
   --raise-menu "$LBR_RAISE_MENU" \
@@ -77,6 +86,7 @@ cat > "$RUN_DIR/environment.json" <<EOF2
   "seed": $SEED,
   "opponent": "lbr",
   "lbr_raise_menu": "$LBR_RAISE_MENU",
+  "lbr_device": "$LBR_DEVICE",
   "dealer_ports": [18901, 18902]
 }
 EOF2
