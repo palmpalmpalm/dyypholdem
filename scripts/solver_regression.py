@@ -1613,8 +1613,8 @@ def _validate_cuda_graph_sample(
             raise RegressionError(f"{label} has an invalid CUDA Graph fallback")
         return
 
-    if device != "cuda" or street != 4:
-        raise RegressionError(f"{label} used CUDA Graphs outside a CUDA river solve")
+    if device != "cuda":
+        raise RegressionError(f"{label} used CUDA Graphs outside a CUDA solve")
     if reason != "enabled":
         raise RegressionError(f"{label} used CUDA Graphs without reason=enabled")
     expected = _expected_cuda_graph_counts(
@@ -2360,7 +2360,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--cuda-graphs",
         choices=("off", "auto", "required"),
         default="off",
-        help="river CUDA Graph mode (default: off)",
+        help="CUDA Graph replay mode for every street (default: off)",
     )
     capture_parser.add_argument("--output", type=Path, required=True)
 

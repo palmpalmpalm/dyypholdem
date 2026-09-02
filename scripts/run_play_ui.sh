@@ -909,7 +909,9 @@ release_launch_lock
 echo "acquired isolated RTX 4090 at \$$COST_PER_HOUR/hour; local hard-deadline watchdog armed"
 
 ssh_ready=0
-for _ in $(seq 1 48); do
+# Secure RTX 4090 pods have taken more than four minutes to expose SSH twice on
+# 2026-09-02; the pod is billed either way, so wait up to ten minutes.
+for _ in $(seq 1 120); do
   if "$LOCAL_PYTHON" "$POD_HELPER" ssh-config --pod-id "$POD_ID" --out "$SSH_CONFIG" >/dev/null 2>&1; then
     ssh_ready=1
     break
@@ -921,7 +923,7 @@ SSH=(ssh -n -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=15)
 SSH_STDIN=(ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=15)
 
 connected=0
-for _ in $(seq 1 36); do
+for _ in $(seq 1 72); do
   if "${SSH[@]}" dyyui true 2>/dev/null; then connected=1; break; fi
   sleep 5
 done
