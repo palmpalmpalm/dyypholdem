@@ -1,4 +1,4 @@
-.PHONY: test web-install web-test web-build model-recovery-progress recover-models compact-model-progress compact-models gpu-model-validation-dry-run gpu-model-validation gpu-baseline-dry-run gpu-baseline play-ui-dry-run play-ui play-ui-status play-ui-logs play-ui-stop random-benchmark-dry-run random-benchmark solver-regression-preflight solver-regression-river solver-regression-compare
+.PHONY: test web-install web-test web-build model-recovery-progress recover-models compact-model-progress compact-models gpu-model-validation-dry-run gpu-model-validation gpu-baseline-dry-run gpu-baseline play-ui-dry-run play-ui play-ui-status play-ui-logs play-ui-stop random-benchmark-dry-run random-benchmark solver-regression-preflight solver-regression-river solver-regression-compare slumbot-benchmark-dry-run slumbot-benchmark
 
 PYTHON ?= /Users/palm/opt/miniconda3/bin/python3
 NPM ?= npm
@@ -8,6 +8,10 @@ SOLVER_REGRESSION_MODEL_ROOT ?= runs/model-recovery/compact
 SOLVER_REGRESSION_OUTPUT ?= runs/solver-regression/current-river.json
 SOLVER_REGRESSION_DEVICE ?= cpu
 SOLVER_REGRESSION_CUDA_GRAPHS ?= off
+SLUMBOT_HANDS ?= 1000
+SLUMBOT_SEED ?= 20260902
+SLUMBOT_GUARD_SECONDS ?= 21600
+SLUMBOT_MAX_TOTAL_COST_USD ?= 5.00
 
 test:
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
@@ -65,6 +69,18 @@ random-benchmark-dry-run: web-test web-build
 
 random-benchmark: web-test web-build
 	DYYPHOLDEM_UI_HANDS=100 DYYPHOLDEM_UI_OPPONENT=random ./scripts/run_play_ui.sh start
+
+slumbot-benchmark-dry-run:
+	DYYPHOLDEM_UI_HANDS=$(SLUMBOT_HANDS) DYYPHOLDEM_UI_SEED=$(SLUMBOT_SEED) DYYPHOLDEM_UI_OPPONENT=slumbot \
+		DYYPHOLDEM_UI_GUARD_SECONDS=$(SLUMBOT_GUARD_SECONDS) \
+		DYYPHOLDEM_UI_MAX_TOTAL_COST_USD=$(SLUMBOT_MAX_TOTAL_COST_USD) \
+		./scripts/run_play_ui.sh dry-run
+
+slumbot-benchmark:
+	DYYPHOLDEM_UI_HANDS=$(SLUMBOT_HANDS) DYYPHOLDEM_UI_SEED=$(SLUMBOT_SEED) DYYPHOLDEM_UI_OPPONENT=slumbot \
+		DYYPHOLDEM_UI_GUARD_SECONDS=$(SLUMBOT_GUARD_SECONDS) \
+		DYYPHOLDEM_UI_MAX_TOTAL_COST_USD=$(SLUMBOT_MAX_TOTAL_COST_USD) \
+		./scripts/run_play_ui.sh start
 
 solver-regression-preflight:
 	$(PYTHON) scripts/solver_regression.py preflight \

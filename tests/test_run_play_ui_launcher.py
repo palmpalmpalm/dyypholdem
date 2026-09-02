@@ -90,6 +90,108 @@ class RunPlayUiLauncherTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be a positive decimal", result.stderr)
 
+    def test_dry_run_slumbot_mode_reports_outbound_api_and_long_guard(self):
+        env = os.environ.copy()
+        env["DYYPHOLDEM_UI_OPPONENT"] = "slumbot"
+        env["DYYPHOLDEM_UI_HANDS"] = "1000"
+        env["DYYPHOLDEM_UI_SEED"] = "20260902"
+        env["DYYPHOLDEM_UI_GUARD_SECONDS"] = "19800"
+        result = subprocess.run(
+            [str(LAUNCHER), "dry-run"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertIn("opponent: slumbot (1000 hands, bot seed 20260902", result.stdout)
+        self.assertIn("public service: none; the bot connects out to https://slumbot.com/api", result.stdout)
+        self.assertIn("hard guard: 19800 seconds", result.stdout)
+
+    def test_guard_above_six_hours_or_unknown_opponent_is_rejected(self):
+        for overrides, message in (
+            ({"DYYPHOLDEM_UI_GUARD_SECONDS": "21601"}, "900 through 21600"),
+            ({"DYYPHOLDEM_UI_OPPONENT": "pluribus"}, "human, random, or slumbot"),
+        ):
+            with self.subTest(overrides=overrides):
+                env = os.environ.copy()
+                env.update(overrides)
+                result = subprocess.run(
+                    [str(LAUNCHER), "dry-run"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
+    def run_bundle_check(self, project_dir, opponent):
+        source = LAUNCHER.read_text()
+        marker = "acquire_launch_lock() {\n"
+        prefix, found, _ = source.partition(marker)
+        self.assertEqual(found, marker)
+        script = (
+            prefix
+            + f"PROJECT_DIR={str(project_dir)!r}\n"
+            + f"OPPONENT={opponent!r}\n"
+            + "SLUMBOT_MODE=0\n"
+            + '[ "$OPPONENT" = slumbot ] && SLUMBOT_MODE=1\n'
+            + "verify_play_ui_bundle\n"
+        )
+        return subprocess.run(["bash"], input=script, check=False, capture_output=True, text=True)
+
+    def test_bundle_check_needs_no_web_build_in_slumbot_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative in (
+                "requirements-play-ui.txt",
+                "scripts/solver_regression.py",
+                "scripts/start_slumbot_remote.sh",
+                "scripts/validate_slumbot_benchmark.py",
+                "src/player/dyypholdem_slumbot_player.py",
+                "src/player/slumbot_match.py",
+                "src/server/slumbot_game.py",
+            ):
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("present\n")
+
+            slumbot = self.run_bundle_check(root, "slumbot")
+            self.assertEqual(slumbot.returncode, 0, slumbot.stderr)
+
+            human = self.run_bundle_check(root, "human")
+            self.assertNotEqual(human.returncode, 0)
+            self.assertIn("missing compiled play UI", human.stderr)
+
+            (root / "src/server/slumbot_game.py").unlink()
+            broken = self.run_bundle_check(root, "slumbot")
+            self.assertNotEqual(broken.returncode, 0)
+            self.assertIn("missing Slumbot benchmark component", broken.stderr)
+
+    def test_code_sync_excludes_every_pod_downloaded_play_asset(self):
+        import fnmatch
+        import re
+
+        source = LAUNCHER.read_text()
+        sync_block = re.search(
+            r'rsync -az -e "ssh -F \$SSH_CONFIG -o BatchMode=yes" \\\n(?:.*\\\n)*?  "\$\{sync_sources\[@\]\}"',
+            source,
+        )
+        self.assertIsNotNone(sync_block, "code sync rsync block not found")
+        excludes = re.findall(r"--exclude '([^']+)'", sync_block.group(0))
+        self.assertIn("*.pt", excludes)
+        self.assertIn("*.pkl", excludes)
+
+        assets = PROJECT_ROOT / "scripts" / "materialize_assets.py"
+        asset_paths = re.findall(r'"(src/[^"]+)"', assets.read_text())
+        self.assertGreaterEqual(len(asset_paths), 8)
+        for relative in asset_paths:
+            self.assertTrue(
+                any(fnmatch.fnmatch(Path(relative).name, pattern) for pattern in excludes),
+                f"{relative} would be uploaded from the local checkout instead of downloaded on the pod",
+            )
+
     def test_spend_gate_accepts_exact_authorized_boundary(self):
         result = self.run_spend_gate("1.00")
 

@@ -1,70 +1,30 @@
-import os
-import sys
 import argparse
+import os
+from pathlib import Path
+import platform
+import sys
 sys.path.append(os.getcwd())
 
 
-def play_hand(token, hand):
-
-    winnings = 0
-
-    response = slumbot_game.new_hand(token)
-    new_token = response.get('token')
-    if new_token:
-        token = new_token
-    arguments.logger.trace(f"Current token: {token}")
-
-    current_state, current_node = slumbot_game.get_next_situation(response)
-
-    winnings = response.get('winnings')
-    # game goes on
-    if winnings is None:
-
-        arguments.logger.info(f"Starting new hand #{hand+1}")
-        continual_resolving.start_new_hand(current_state)
-
-        while True:
-            # use continual resolving to find a strategy and make an action in the current node
-            advised_action: protocol_to_node.Action = continual_resolving.compute_action(current_state, current_node)
-
-            # send the action to the server
-            response = slumbot_game.play_action(token, advised_action)
-            current_state, current_node = slumbot_game.get_next_situation(response)
-
-            winnings = response.get('winnings')
-            if winnings is not None:
-                # hand has ended
-                break
-
-    # clean up and release memory
-    if arguments.use_gpu:
-        arguments.logger.trace(f"Initiating garbage collection. Allocated memory={torch.cuda.memory_allocated('cuda')}, Reserved memory={torch.cuda.memory_reserved('cuda')}")
-    del current_node
-    del current_state
-    gc.collect()
-    if arguments.use_gpu:
-        torch.cuda.empty_cache()
-        arguments.logger.trace(f"Garbage collection performed. Allocated memory={torch.cuda.memory_allocated('cuda')}, Reserved memory={torch.cuda.memory_reserved('cuda')}")
-
-    return token, winnings
-
-
-def play_slumbot():
-    token = None
-    num_hands = args.hands
-    winnings = 0
-    for hand in range(num_hands):
-        token, hand_winnings = play_hand(token, hand)
-        winnings += hand_winnings
-        arguments.logger.success(f"Hand completed. Hand winnings: {hand_winnings}, Total winnings: {winnings} ")
-
-    arguments.logger.success(f"Game ended >>> Total winnings: {winnings}")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description='Play with DyypHoldem against Slumbot')
+    parser.add_argument('hands', type=int, help="Number of hands to play against Slumbot")
+    parser.add_argument("--host", type=str, default="slumbot.com", help="Slumbot API host")
+    parser.add_argument("--seed", type=int, default=None, help="seed Torch and Python action sampling")
+    parser.add_argument("--telemetry", type=Path, default=None, help="private decision JSONL output")
+    parser.add_argument("--report", type=Path, default=None, help="safe live JSON timing report")
+    parser.add_argument("--text-report", type=Path, default=None, help="safe live text timing report")
+    parser.add_argument("--events", type=Path, default=None, help="safe per-hand JSONL events")
+    parser.add_argument("--summary", type=Path, default=None, help="safe live JSON match summary")
+    parser.add_argument("--max-consecutive-errors", type=int, default=3,
+                        help="abort after this many consecutive failed hands")
+    return parser
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Play with DyypHoldem against Slumbot')
-    parser.add_argument('hands', type=int, help="Number of hands to play against Slumbot")
-    args = parser.parse_args()
+    args = build_parser().parse_args()
+    if args.hands < 1:
+        raise SystemExit("hands must be at least 1")
 
     import gc
 
@@ -73,10 +33,75 @@ if __name__ == '__main__':
     import settings.arguments as arguments
 
     from server.slumbot_game import SlumbotGame
-    import server.protocol_to_node as protocol_to_node
     from lookahead.continual_resolving import ContinualResolving
+    from player.slumbot_match import SlumbotMatch
+    from utils.decision_telemetry import DecisionTelemetryWriter, model_manifest
 
-    slumbot_game = SlumbotGame()
+    import utils.pseudo_random as random_
+
+    if args.seed is not None:
+        if not 0 <= args.seed <= 2_147_483_647:
+            raise SystemExit("seed must be between 0 and 2147483647")
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        random_.rng.seed(args.seed)
+
+    slumbot_game = SlumbotGame(host=args.host)
     continual_resolving = ContinualResolving()
 
-    play_slumbot()
+    telemetry_writer = None
+    if args.telemetry is not None:
+        report_path = args.report or args.telemetry.with_name("timing_report.json")
+        text_report_path = args.text_report or args.telemetry.with_name("timing_report.txt")
+        compact_root_raw = os.environ.get("DYYPHOLDEM_COMPACT_MODEL_PATH")
+        compact_root = Path(compact_root_raw).resolve() if compact_root_raw else None
+        gpu_name = torch.cuda.get_device_name(0) if arguments.use_gpu and torch.cuda.is_available() else None
+        telemetry_writer = DecisionTelemetryWriter(
+            args.telemetry,
+            report_path,
+            text_report_path,
+            {
+                "source_commit": os.environ.get("DYYPHOLDEM_SOURCE_COMMIT"),
+                "python": platform.python_version(),
+                "torch": torch.__version__,
+                "cuda_runtime": torch.version.cuda,
+                "gpu_name": gpu_name,
+                "cfr_iterations": arguments.cfr_iters,
+                "cfr_skip_iterations": arguments.cfr_skip_iters,
+                "bot_seed": args.seed,
+                "opponent": "slumbot",
+                "slumbot_host": args.host,
+                "expected_hands": args.hands,
+                "compact_models": model_manifest(compact_root),
+            },
+        )
+        telemetry_writer.append(continual_resolving.initialization_telemetry)
+
+    arguments.logger.success(
+        f"AI_READY initialization_seconds={continual_resolving.initialization_seconds:.6f} "
+        f"device={arguments.device}"
+    )
+
+    if arguments.use_pseudo_random:
+        random_.manual_seed(0)
+
+    def collect_garbage() -> None:
+        gc.collect()
+        if arguments.use_gpu and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    match = SlumbotMatch(
+        slumbot_game,
+        continual_resolving,
+        args.hands,
+        events_path=args.events,
+        summary_path=args.summary,
+        telemetry_writer=telemetry_writer,
+        logger=arguments.logger,
+        after_hand=collect_garbage,
+        max_consecutive_errors=args.max_consecutive_errors,
+        host=args.host,
+        seed=args.seed,
+    )
+    sys.exit(match.run())

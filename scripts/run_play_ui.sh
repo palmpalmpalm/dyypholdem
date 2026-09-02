@@ -24,6 +24,10 @@ HANDS="${DYYPHOLDEM_UI_HANDS:-100}"
 SEED="${DYYPHOLDEM_UI_SEED:-20260823}"
 OPPONENT="${DYYPHOLDEM_UI_OPPONENT:-human}"
 OPPONENT_SEED="${DYYPHOLDEM_UI_OPPONENT_SEED:-20260824}"
+SLUMBOT_MODE=0
+if [ "$OPPONENT" = "slumbot" ]; then
+  SLUMBOT_MODE=1
+fi
 GPU_REGRESSION="${DYYPHOLDEM_UI_GPU_REGRESSION:-1}"
 MODEL_ROOT="${DYYPHOLDEM_COMPACT_MODEL_PATH:-$PROJECT_DIR/runs/model-recovery/compact}"
 HTTP_PORT=8000
@@ -120,12 +124,12 @@ PY
 }
 
 validate_config() {
-  validate_uint DYYPHOLDEM_UI_GUARD_SECONDS "$GUARD_SECONDS" 900 14400
+  validate_uint DYYPHOLDEM_UI_GUARD_SECONDS "$GUARD_SECONDS" 900 21600
   validate_uint DYYPHOLDEM_UI_HANDS "$HANDS" 1 1000
   validate_uint DYYPHOLDEM_UI_SEED "$SEED" 0 2147483647
   validate_uint DYYPHOLDEM_UI_OPPONENT_SEED "$OPPONENT_SEED" 0 2147483647
-  [ "$OPPONENT" = "human" ] || [ "$OPPONENT" = "random" ] || {
-    echo "DYYPHOLDEM_UI_OPPONENT must be human or random" >&2
+  [ "$OPPONENT" = "human" ] || [ "$OPPONENT" = "random" ] || [ "$OPPONENT" = "slumbot" ] || {
+    echo "DYYPHOLDEM_UI_OPPONENT must be human, random, or slumbot" >&2
     return 1
   }
   [ "$GPU_REGRESSION" = 0 ] || [ "$GPU_REGRESSION" = 1 ] || {
@@ -171,6 +175,16 @@ verify_play_ui_bundle() {
     echo "missing strict solver regression harness" >&2
     return 1
   }
+  if [ "$SLUMBOT_MODE" = 1 ]; then
+    for relative in scripts/start_slumbot_remote.sh scripts/validate_slumbot_benchmark.py \
+        src/player/dyypholdem_slumbot_player.py src/player/slumbot_match.py src/server/slumbot_game.py; do
+      [ -s "$PROJECT_DIR/$relative" ] || {
+        echo "missing Slumbot benchmark component: $relative" >&2
+        return 1
+      }
+    done
+    return 0
+  fi
   [ -s "$PROJECT_DIR/web/dist/index.html" ] || {
     echo "missing compiled play UI; run 'make web-build' before renting" >&2
     return 1
@@ -530,6 +544,33 @@ validate_random_completion() {
   return 1
 }
 
+local_slumbot_summary() {
+  summary_file="$LOCAL_RUN_DIR/slumbot-summary.json"
+  [ -s "$summary_file" ] || return 1
+  "$LOCAL_PYTHON" - "$summary_file" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1]))
+except ValueError:
+    raise SystemExit(1)
+print(value.get("status") or "unknown", int(value.get("hands_completed") or 0), int(value.get("hands_attempted") or 0))
+PY
+}
+
+validate_slumbot_completion() {
+  [ "$SLUMBOT_MODE" = 1 ] || return 0
+  [ "$REMOTE_READY" = 1 ] && [ -s "$SSH_CONFIG" ] || return 1
+  for _ in $(seq 1 3); do
+    if ssh -n -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=10 dyyui \
+        "python3 /root/dyypholdem/scripts/validate_slumbot_benchmark.py --run-dir /root/dyypholdem/runs/play-ui/$RUN_NAME --hands '$HANDS'"
+    then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 controller_state() {
   controller_pid=""
   [ -s "$CONTROLLER_PID_FILE" ] && controller_pid="$(tr -cd '0-9' < "$CONTROLLER_PID_FILE")"
@@ -618,12 +659,21 @@ PY
 
 if [ "$COMMAND" = "dry-run" ]; then
   validate_config
+  if [ "$SLUMBOT_MODE" = 1 ]; then
+    dry_run_service="none; the bot connects out to https://slumbot.com/api"
+    dry_run_solver="ContinualResolving versus Slumbot's public HUNL API, 1,000 CFR iterations"
+    dry_run_opponent="slumbot ($HANDS hands, bot seed $SEED, no web bundle required)"
+  else
+    dry_run_service="authenticated HTTPS proxy on port $HTTP_PORT"
+    dry_run_solver="real ACPC dealer + ContinualResolving, 1,000 CFR iterations"
+    dry_run_opponent="$OPPONENT${OPPONENT_SEED:+ (seed $OPPONENT_SEED)}"
+  fi
   printf '%s\n' \
     "DyypHoldem live UI dry run" \
     "  GPU: one $CLOUD_TYPE $GPU_TYPE" \
-    "  public service: authenticated HTTPS proxy on port $HTTP_PORT" \
-    "  solver: real ACPC dealer + ContinualResolving, 1,000 CFR iterations" \
-    "  opponent: $OPPONENT${OPPONENT_SEED:+ (seed $OPPONENT_SEED)}" \
+    "  public service: $dry_run_service" \
+    "  solver: $dry_run_solver" \
+    "  opponent: $dry_run_opponent" \
     "  models: four checksum-verified compact recovered networks" \
     "  telemetry: private JSONL plus safe live/final per-street reports" \
     "  GPU regression: $GPU_REGRESSION (strict preflop root/chance tensors before UI start)" \
@@ -650,6 +700,7 @@ if [ "$COMMAND" = "status" ] || [ "$COMMAND" = "logs" ] || [ "$COMMAND" = "stop"
     fi
     [ -s "$LOCAL_RUN_DIR/timing_report.txt" ] && sed -n '1,240p' "$LOCAL_RUN_DIR/timing_report.txt"
     [ -s "$LOCAL_RUN_DIR/safe-events.jsonl" ] && tail -20 "$LOCAL_RUN_DIR/safe-events.jsonl"
+    [ -s "$LOCAL_RUN_DIR/slumbot-events.jsonl" ] && tail -20 "$LOCAL_RUN_DIR/slumbot-events.jsonl"
     exit 0
   fi
   load_credentials
@@ -705,7 +756,11 @@ if [ -s "$CURRENT_MANIFEST" ]; then
   fi
 fi
 
-RUN_NAME="dyypholdem-ui-$(date -u +%Y%m%dT%H%M%SZ)"
+if [ "$SLUMBOT_MODE" = 1 ]; then
+  RUN_NAME="dyypholdem-slumbot-$(date -u +%Y%m%dT%H%M%SZ)"
+else
+  RUN_NAME="dyypholdem-ui-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
 POD_NAME="$RUN_NAME-$PPID-$$"
 LOCAL_RUN_DIR="$SESSION_ROOT/$RUN_NAME"
 mkdir -p "$LOCAL_RUN_DIR"
@@ -725,11 +780,11 @@ import json
 import sys
 
 pods = json.load(open(sys.argv[1]))
-print("\n".join(str(pod.get("id") or "") for pod in pods if str(pod.get("name") or "").startswith("dyypholdem-ui-")))
+print("\n".join(str(pod.get("id") or "") for pod in pods if str(pod.get("name") or "").startswith(("dyypholdem-ui-", "dyypholdem-slumbot-"))))
 PY
 )"
 [ -z "$existing_ui_pods" ] || {
-  echo "a DyypHoldem UI pod already exists; inspect or stop it before launching another" >&2
+  echo "a DyypHoldem UI or Slumbot pod already exists; inspect or stop it before launching another" >&2
   exit 1
 }
 echo "RunPod preflight complete; no existing pod was changed"
@@ -777,10 +832,15 @@ arm_local_watchdog
 write_manifest starting
 enforce_projected_spend_cap
 
-"$LOCAL_PYTHON" "$POD_HELPER" public-url --pod-id "$POD_ID" --http-port "$HTTP_PORT" > "$URL_JSON"
-PUBLIC_URL="$(json_field "$URL_JSON" url)"
-[ -n "$PUBLIC_URL" ] || { echo "RunPod helper returned no public UI URL" >&2; exit 1; }
-AUTHENTICATED_URL="$PUBLIC_URL/?token=$SESSION_TOKEN"
+if [ "$SLUMBOT_MODE" = 1 ]; then
+  PUBLIC_URL=""
+  AUTHENTICATED_URL=""
+else
+  "$LOCAL_PYTHON" "$POD_HELPER" public-url --pod-id "$POD_ID" --http-port "$HTTP_PORT" > "$URL_JSON"
+  PUBLIC_URL="$(json_field "$URL_JSON" url)"
+  [ -n "$PUBLIC_URL" ] || { echo "RunPod helper returned no public UI URL" >&2; exit 1; }
+  AUTHENTICATED_URL="$PUBLIC_URL/?token=$SESSION_TOKEN"
+fi
 write_manifest starting
 release_launch_lock
 echo "acquired isolated RTX 4090 at \$$COST_PER_HOUR/hour; local hard-deadline watchdog armed"
@@ -813,11 +873,19 @@ printf '%s\n' "$RUNPOD_API_KEY" | "${SSH_STDIN[@]}" dyyui "$remote_guard_command
 echo "authenticated remote hard-deadline delete guard armed"
 
 "${SSH[@]}" dyyui 'if command -v rsync >/dev/null && command -v curl >/dev/null; then :; else (apt-get update -qq && apt-get install -y -qq rsync curl) >/dev/null 2>&1 || exit 1; fi; mkdir -p /root/dyypholdem /root/logs'
+sync_sources=("$PROJECT_DIR/src" "$PROJECT_DIR/scripts" "$PROJECT_DIR/acpc_server" "$PROJECT_DIR/requirements-play-ui.txt")
+if [ "$SLUMBOT_MODE" != 1 ]; then
+  sync_sources+=("$PROJECT_DIR/web")
+fi
+# Tracked play assets (bucket tables, hand ranks, equity matrices) are large
+# Git LFS objects. The pod downloads and checksums them itself through
+# scripts/materialize_assets.py; shipping local copies over the home uplink
+# took 96 minutes on 2026-09-01, so the code sync excludes them.
 rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" \
   --exclude .git --exclude .DS_Store --exclude __pycache__ --exclude runs \
   --exclude node_modules --exclude coverage --exclude .vite \
-  "$PROJECT_DIR/src" "$PROJECT_DIR/scripts" "$PROJECT_DIR/acpc_server" \
-  "$PROJECT_DIR/web" "$PROJECT_DIR/requirements-play-ui.txt" \
+  --exclude '*.pt' --exclude '*.pkl' --exclude '*.sqlite' \
+  "${sync_sources[@]}" \
   dyyui:/root/dyypholdem/
 "${SSH[@]}" dyyui "python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version' && python3 -m pip install --quiet --break-system-packages -r /root/dyypholdem/requirements-play-ui.txt && python3 -c 'import gdown, loguru, pokerkit; from importlib.metadata import version; assert version(\"gdown\") == \"5.2.0\"; assert version(\"loguru\") == \"0.7.3\"; assert version(\"PokerKit\") == \"0.7.5\"' && mkdir -p /root/dyypholdem/runs/model-recovery/compact /root/dyypholdem/runs/play-ui/$RUN_NAME"
 rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" "$MODEL_ROOT/" dyyui:/root/dyypholdem/runs/model-recovery/compact/
@@ -846,8 +914,13 @@ if [ "$GPU_REGRESSION" = 1 ]; then
   "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 -c 'import json; p=json.load(open(\"runs/play-ui/$RUN_NAME/solver-regression-cuda.json\")); s=p[\"spots\"][0]; rows=[a for b in s[\"chance_action_cfvs\"][\"boards\"] for a in b[\"actions\"]]; assert s[\"timing\"][\"max_repeat_tensor_delta\"] == 0; assert len(rows) == 6; assert all(a[\"timing\"][\"solver\"].get(\"captured_flop\") is True and a[\"timing\"][\"solver\"].get(\"replayed_flop\") is False for a in rows)'"
 fi
 
-echo "starting dealer, authenticated UI, and real continual resolver"
-"${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD); cd /root/dyypholdem && ./scripts/start_play_ui_remote.sh '$RUN_NAME' '$HANDS' '$SEED' /root/dyypholdem/session-token '$OPPONENT' '$OPPONENT_SEED'"
+if [ "$SLUMBOT_MODE" = 1 ]; then
+  echo "starting real continual resolver against Slumbot"
+  "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD); cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED'"
+else
+  echo "starting dealer, authenticated UI, and real continual resolver"
+  "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD); cd /root/dyypholdem && ./scripts/start_play_ui_remote.sh '$RUN_NAME' '$HANDS' '$SEED' /root/dyypholdem/session-token '$OPPONENT' '$OPPONENT_SEED'"
+fi
 
 ai_ready=0
 for _ in $(seq 1 120); do
@@ -859,6 +932,26 @@ for _ in $(seq 1 120); do
 done
 [ "$ai_ready" = 1 ] || { echo "DyypHoldem did not finish initialization" >&2; exit 1; }
 
+if [ "$SLUMBOT_MODE" = 1 ]; then
+  first_hand=0
+  for _ in $(seq 1 120); do
+    copy_back_once || true
+    if read -r slumbot_status slumbot_hands slumbot_attempted < <(local_slumbot_summary 2>/dev/null); then
+      case "$slumbot_status" in
+        failed) echo "Slumbot match failed before its first completed hand" >&2; exit 1 ;;
+        complete) first_hand=1; break ;;
+        running)
+          if [ "$slumbot_attempted" -ge 1 ]; then
+            first_hand=1
+            break
+          fi
+          ;;
+      esac
+    fi
+    sleep 3
+  done
+  [ "$first_hand" = 1 ] || { echo "Slumbot match never started its first hand" >&2; exit 1; }
+else
 proxy_ready=0
 for _ in $(seq 1 90); do
   if curl -fsS --max-time 10 "$PUBLIC_URL/healthz" >/dev/null 2>&1; then
@@ -913,6 +1006,7 @@ for _ in $(seq 1 120); do
   sleep 3
 done
 [ "$first_matchstate" = 1 ] || { echo "browser bridge never received a playable MATCHSTATE" >&2; exit 1; }
+fi
 
 if ! copy_back_once; then
   echo "initial telemetry copyback failed" >&2
@@ -960,6 +1054,40 @@ PY
     echo "warning: RunPod status transport failed; watchdogs remain armed" >&2
   fi
 
+  if [ "$SLUMBOT_MODE" = 1 ]; then
+  slumbot_status="unknown"
+  if read -r slumbot_status slumbot_hands slumbot_attempted < <(local_slumbot_summary 2>/dev/null); then
+    case "$slumbot_status" in
+      complete)
+        [ "$completion_detected_epoch" -ne 0 ] || completion_detected_epoch="$(date +%s)"
+        ;;
+      failed)
+        echo "Slumbot match reported failure; terminating early" >&2
+        FINAL_REASON="slumbot_match_failed"
+        run_result=1
+        break
+        ;;
+    esac
+  fi
+  if process_state="$(remote_process_state 2>/dev/null)"; then
+    case "$process_state" in
+      *"bot=dead"*)
+        if [ "$slumbot_status" != "complete" ]; then
+          copy_back_once || true
+          read -r slumbot_status slumbot_hands slumbot_attempted < <(local_slumbot_summary 2>/dev/null) || slumbot_status="unknown"
+        fi
+        if [ "$slumbot_status" = "complete" ]; then
+          [ "$completion_detected_epoch" -ne 0 ] || completion_detected_epoch="$(date +%s)"
+        else
+          echo "Slumbot bot process exited before completion (status $slumbot_status); terminating early" >&2
+          FINAL_REASON="bot_process_exited"
+          run_result=1
+          break
+        fi
+        ;;
+    esac
+  fi
+  else
   if read -r ui_status hands_completed < <(fetch_ui_state 2>/dev/null); then
     case "$ui_status" in
       error)
@@ -1005,6 +1133,7 @@ PY
         ;;
     esac
   fi
+  fi
 
   if [ "$completion_detected_epoch" -ne 0 ] && \
       [ $(( $(date +%s) - completion_detected_epoch )) -ge "$MATCH_COMPLETE_GRACE_SECONDS" ]; then
@@ -1021,6 +1150,10 @@ if [ "$OPPONENT" = "random" ] && [ "$FINAL_REASON" = "running" ] && \
     [ "$completion_detected_epoch" -ne 0 ] && validate_random_completion; then
   FINAL_REASON="match_complete"
 fi
+if [ "$SLUMBOT_MODE" = 1 ] && [ "$FINAL_REASON" = "running" ] && \
+    [ "$completion_detected_epoch" -ne 0 ] && validate_slumbot_completion; then
+  FINAL_REASON="match_complete"
+fi
 [ -n "$FINAL_REASON" ] && [ "$FINAL_REASON" != "running" ] || FINAL_REASON="guard_finalize_margin"
 if [ "$OPPONENT" = "random" ]; then
   if [ "$FINAL_REASON" = "match_complete" ]; then
@@ -1031,6 +1164,18 @@ if [ "$OPPONENT" = "random" ]; then
     fi
   elif [ "$run_result" -eq 0 ]; then
     echo "random benchmark ended before all $HANDS hands completed" >&2
+    run_result=1
+  fi
+fi
+if [ "$SLUMBOT_MODE" = 1 ]; then
+  if [ "$FINAL_REASON" = "match_complete" ]; then
+    if ! validate_slumbot_completion; then
+      echo "Slumbot benchmark failed final artifact validation" >&2
+      FINAL_REASON="slumbot_completion_validation_failed"
+      run_result=1
+    fi
+  elif [ "$run_result" -eq 0 ]; then
+    echo "Slumbot benchmark ended before all $HANDS hands completed" >&2
     run_result=1
   fi
 fi

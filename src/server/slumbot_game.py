@@ -1,5 +1,30 @@
-import requests
-import sys
+"""Slumbot HTTP API adapter.
+
+Slumbot (https://www.slumbot.com) plays heads-up no-limit Texas hold'em with
+20,000-chip stacks and 50/100 blinds, the same game DyypHoldem is configured
+for. This module turns each Slumbot API response into the ACPC ``MATCHSTATE``
+string DyypHoldem already understands, and converts DyypHoldem's cumulative
+ACPC actions back into Slumbot's street-local ``b<amount>``, ``c``, ``k`` and
+``f`` encoding.
+
+Slumbot positions: ``client_pos`` 1 is the small blind and acts first before
+the flop; ``client_pos`` 0 is the big blind and acts first on every later
+street. The bundled ACPC ``holdem.nolimit.2p.reverse_blinds.game`` uses the
+same numbering (player 0 posts the big blind), so the position is copied
+verbatim into the ``MATCHSTATE``.
+
+Slumbot bet amounts are the street-local "bet to" level (before the flop that
+level starts at the big blind), while ACPC raise amounts are cumulative hand
+commitments. Both directions of that conversion are derived from Slumbot's own
+reference action parser, never from locally tracked commitments.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import urllib.error
+import urllib.request
 
 import settings.arguments as arguments
 import settings.constants as constants
@@ -7,8 +32,7 @@ import settings.game_settings as game_settings
 
 import server.protocol_to_node as protocol_to_node
 
-host = 'slumbot.com'
-
+HOST = "slumbot.com"
 NUM_STREETS = constants.streets_count
 SMALL_BLIND = 50
 BIG_BLIND = 100
@@ -17,144 +41,231 @@ game_settings.small_blind = SMALL_BLIND
 game_settings.big_blind = BIG_BLIND
 game_settings.stack = STACK_SIZE
 
+# Backwards-compatible module alias used by the original client.
+host = HOST
+
+
+class SlumbotError(RuntimeError):
+    """Base class for Slumbot session failures."""
+
+
+class SlumbotTransportError(SlumbotError):
+    """The Slumbot API could not be reached after the configured retries."""
+
+
+class SlumbotProtocolError(SlumbotError):
+    """Slumbot rejected a request or returned a state DyypHoldem cannot act on."""
+
 
 class SlumbotGame(object):
-    last_response: dict
-    acpc_actions: str
-    current_state: dict
-    max_bet: int
-    bet_this_street: int
-    bet_previous_streets: int
-    current_street: int
+    """One Slumbot API session presented through DyypHoldem's ACPC state model."""
 
-    def __init__(self):
-        pass
+    def __init__(
+        self,
+        host: str = HOST,
+        request_timeout: float = 30.0,
+        max_attempts: int = 5,
+        backoff_seconds: float = 2.0,
+        sleep=time.sleep,
+        opener=urllib.request.urlopen,
+    ):
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        self.host = host
+        self.request_timeout = float(request_timeout)
+        self.max_attempts = int(max_attempts)
+        self.backoff_seconds = float(backoff_seconds)
+        self._sleep = sleep
+        self._opener = opener
+        self.request_retries = 0
+        self.last_action_string: str | None = None
+        self.last_correction: str | None = None
+        self.reset_hand()
 
-    def new_hand(self, token):
-        self.last_response = None
+    def reset_hand(self) -> None:
+        self.last_response: dict | None = None
         self.acpc_actions = ""
-        self.max_bet = 0
-        self.bet_this_street = 0
-        self.bet_previous_streets = 0
-        self.current_street = 0
+        self.current_state: dict | None = None
+        self.hand_number = 0
+        self.last_action_string = None
+        self.last_correction = None
 
+    # -- transport ---------------------------------------------------------
+
+    def _post(self, path: str, payload: dict) -> dict:
+        body = json.dumps(payload).encode("utf-8")
+        last_error = "unknown transport failure"
+        for attempt in range(1, self.max_attempts + 1):
+            request = urllib.request.Request(
+                f"https://{self.host}{path}",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+            )
+            try:
+                with self._opener(request, timeout=self.request_timeout) as response:
+                    raw = response.read().decode("utf-8")
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode("utf-8", errors="replace")[:500]
+                if 500 <= error.code < 600 and attempt < self.max_attempts:
+                    last_error = f"HTTP {error.code} from {path}"
+                    self._retry_delay(attempt, last_error)
+                    continue
+                if 500 <= error.code < 600:
+                    raise SlumbotTransportError(f"HTTP {error.code} from {path}: {detail}") from error
+                raise SlumbotProtocolError(f"HTTP {error.code} from {path}: {detail}") from error
+            except (urllib.error.URLError, TimeoutError, OSError) as error:
+                last_error = f"{type(error).__name__}: {getattr(error, 'reason', error)}"
+                if attempt < self.max_attempts:
+                    self._retry_delay(attempt, last_error)
+                    continue
+                raise SlumbotTransportError(f"{path} failed after {attempt} attempts: {last_error}") from error
+
+            try:
+                parsed = json.loads(raw)
+            except ValueError as error:
+                raise SlumbotProtocolError(f"{path} returned non-JSON content") from error
+            if not isinstance(parsed, dict):
+                raise SlumbotProtocolError(f"{path} returned a non-object JSON payload")
+            if "error_msg" in parsed:
+                raise SlumbotProtocolError(f"Slumbot rejected {path}: {parsed['error_msg']}")
+            return parsed
+        raise SlumbotTransportError(f"{path} failed: {last_error}")
+
+    def _retry_delay(self, attempt: int, reason: str) -> None:
+        self.request_retries += 1
+        delay = self.backoff_seconds * (2 ** (attempt - 1))
+        arguments.logger.warning(f"Slumbot request retry {attempt}: {reason}; sleeping {delay:.1f}s")
+        self._sleep(delay)
+
+    # -- hand lifecycle ----------------------------------------------------
+
+    def new_hand(self, token: str | None, hand_number: int = 0) -> dict:
+        self.reset_hand()
+        self.hand_number = int(hand_number)
         data = {}
         if token:
-            data['token'] = token
-        # Use verify=false to avoid SSL Error
-        response = requests.post(f'https://{host}/api/new_hand', headers={}, json=data)
-        success = getattr(response, 'status_code') == 200
-        if not success:
-            arguments.logger.critical('Status code: %s' % repr(response.status_code))
-            try:
-                arguments.logger.error('Error response: %s' % repr(response.json()))
-            except ValueError:
-                pass
-            sys.exit(-1)
+            data["token"] = token
+        response = self._post("/api/new_hand", data)
+        self.last_response = response
+        return response
 
-        try:
-            r = response.json()
-        except ValueError:
-            arguments.logger.critical('Could not get JSON from response')
-            sys.exit(-1)
+    def get_next_situation(self, response: dict, hand_number: int | None = None):
+        """Convert a Slumbot response into DyypHoldem's state and tree node.
 
-        if 'error_msg' in r:
-            arguments.logger.critical('Error: %s' % r['error_msg'])
-            sys.exit(-1)
-
-        return r
-
-    def get_next_situation(self, response):
+        Raises ``SlumbotProtocolError`` unless the reconstructed state has
+        DyypHoldem to act, so an encoding mismatch can never silently drive
+        the solver from the wrong seat.
+        """
+        if hand_number is not None:
+            self.hand_number = int(hand_number)
         arguments.logger.trace(f"Message from server: {repr(response)}")
-        action = response.get('action')
+        action = response.get("action")
+        if not isinstance(action, str):
+            raise SlumbotProtocolError("Slumbot response has no action string")
         self.current_state = self.parse_action(action)
-        if 'error' in self.current_state:
-            arguments.logger.critical('Error parsing action %s: %s' % (action, self.current_state['error']))
-            sys.exit(-1)
-        if self.current_street != self.current_state['st']:
-            self.current_street = self.current_state['st']
-            self.bet_previous_streets += self.bet_this_street
-            self.bet_this_street = 0
+        if "error" in self.current_state:
+            raise SlumbotProtocolError(
+                f"could not parse Slumbot action {action!r}: {self.current_state['error']}"
+            )
+        client_pos = response.get("client_pos")
+        if client_pos not in (0, 1):
+            raise SlumbotProtocolError(f"Slumbot response has invalid client_pos {client_pos!r}")
+        if self.current_state["pos"] != client_pos:
+            raise SlumbotProtocolError(
+                f"Slumbot state {action!r} has player {self.current_state['pos']} to act, "
+                f"not the client seat {client_pos}"
+            )
 
-        msg = self.convert_state(response, self.current_state)
+        msg = self.convert_state(response, self.current_state, self.hand_number)
         arguments.logger.info(f"New state received from server: {msg}")
         parsed_state = protocol_to_node.parse_state(msg)
+        if parsed_state.acting_player != parsed_state.player:
+            raise SlumbotProtocolError(
+                f"reconstructed ACPC state {msg!r} does not have DyypHoldem to act"
+            )
         node = protocol_to_node.parsed_state_to_node(parsed_state)
-
         self.last_response = response
-
         return parsed_state, node
 
-    def convert_state(self, response, state):
+    def convert_state(self, response: dict, state: dict, hand_number: int | None = None) -> str:
         prefix = "MATCHSTATE"
-        position = response.get('client_pos')
-        hole_cards_list = response.get('hole_cards')
-        board_cards_list = response.get('board')
-        hole_cards = ""
-        for i in range(len(hole_cards_list)):
-            hole_cards += hole_cards_list[i]
+        position = response.get("client_pos")
+        hole_cards_list = response.get("hole_cards") or []
+        board_cards_list = response.get("board") or []
+        hole_cards = "".join(str(card) for card in hole_cards_list)
         if position == 0:
             hole_cards += "|"
         else:
             hole_cards = "|" + hole_cards
         board_cards = ""
-        for i in range(len(board_cards_list)):
+        for i, card in enumerate(board_cards_list):
             if i == 0 or i == 3 or i == 4:
                 board_cards += "/"
-            board_cards += board_cards_list[i]
-        self.acpc_actions, self.max_bet = self.acpcify_actions(response.get('action'))
-        return f"{prefix}:{position}:0:{self.acpc_actions}:{hole_cards}{board_cards}"
+            board_cards += str(card)
+        self.acpc_actions, self.max_bet = self.acpcify_actions(response.get("action") or "")
+        hand_id = self.hand_number if hand_number is None else int(hand_number)
+        return f"{prefix}:{position}:{hand_id}:{self.acpc_actions}:{hole_cards}{board_cards}"
 
-    def play_action(self, token, advised_action: protocol_to_node.Action):
-        next_action = ""
+    # -- action encoding ---------------------------------------------------
+
+    def encode_action(self, advised_action: protocol_to_node.Action) -> tuple[str, str | None]:
+        """Return Slumbot's action string plus an optional legality correction note."""
+        state = self.current_state
+        if state is None or "error" in state:
+            raise SlumbotProtocolError("no parsed Slumbot state is available for action encoding")
+
         if advised_action.action == constants.ACPCActions.fold:
-            next_action = "f"
-        elif advised_action.action == constants.ACPCActions.ccall:
-            if self.current_state["street_last_bet_to"] == 0:
-                next_action = "k"
-            else:
-                next_action = "c"
-                arguments.logger.debug(f"Calling bet of: {self.current_state['street_last_bet_to']}")
-                self.bet_this_street += self.current_state["street_last_bet_to"]
-        elif advised_action.action == constants.ACPCActions.rraise:
-            raise_amount = advised_action.raise_amount
-            arguments.logger.trace(f"Raise amount: {raise_amount}")
-            self.bet_this_street = raise_amount - self.bet_previous_streets
-            arguments.logger.trace(f"Calculated bet size: {self.bet_this_street}")
-            if self.bet_this_street + self.bet_previous_streets > game_settings.stack:
-                self.bet_this_street = game_settings.stack - self.bet_previous_streets
-                arguments.logger.warning(f"Bet size corrected for all-in: {self.bet_this_street}")
-            elif self.bet_this_street < self.max_bet:
-                self.bet_this_street = self.max_bet
-                arguments.logger.warning(f"Bet size corrected to be min bet size: {self.bet_this_street}")
-            next_action = f"b{self.bet_this_street}"
+            return "f", None
 
+        if advised_action.action == constants.ACPCActions.ccall:
+            return ("c" if state["last_bet_size"] > 0 else "k"), None
+
+        if advised_action.action != constants.ACPCActions.rraise:
+            raise SlumbotProtocolError(f"unsupported DyypHoldem action {advised_action.action!r}")
+
+        raise_to = int(advised_action.raise_amount)
+        street_last_bet_to = int(state["street_last_bet_to"])
+        previous_streets = int(state["total_last_bet_to"]) - street_last_bet_to
+        remaining = STACK_SIZE - street_last_bet_to
+        if remaining <= 0:
+            raise SlumbotProtocolError("DyypHoldem tried to raise with no chips behind")
+        last_bet_size = int(state["last_bet_size"])
+        min_bet_size = max(last_bet_size, BIG_BLIND) if last_bet_size > 0 else BIG_BLIND
+        min_bet_size = min(min_bet_size, remaining)
+
+        street_bet_to = raise_to - previous_streets
+        requested_size = street_bet_to - street_last_bet_to
+        correction = None
+        if requested_size > remaining:
+            street_bet_to = street_last_bet_to + remaining
+            correction = f"raise_to_{raise_to}_capped_to_all_in"
+        elif requested_size < min_bet_size:
+            street_bet_to = street_last_bet_to + min_bet_size
+            correction = f"raise_to_{raise_to}_lifted_to_min_raise"
+        if correction is not None:
+            arguments.logger.warning(
+                f"Slumbot legality correction: {correction} (street bet-to {street_bet_to})"
+            )
+        return f"b{street_bet_to}", correction
+
+    def play_action(self, token: str | None, advised_action: protocol_to_node.Action) -> dict:
+        next_action, correction = self.encode_action(advised_action)
+        self.last_action_string = next_action
+        self.last_correction = correction
         arguments.logger.debug(f"Sending action to server: {next_action}")
+        data = {"incr": next_action}
+        if token:
+            data["token"] = token
+        response = self._post("/api/act", data)
+        self.last_response = response
+        return response
 
-        data = {'token': token, 'incr': next_action}
-        # Use verify=false to avoid SSL Error
-        response = requests.post(f'https://{host}/api/act', headers={}, json=data)
-        success = getattr(response, 'status_code') == 200
-        if not success:
-            arguments.logger.critical('Status code: %s' % repr(response.status_code))
-            try:
-                arguments.logger.error('Error response: %s' % repr(response.json()))
-            except ValueError:
-                pass
-            sys.exit(-1)
-        try:
-            r = response.json()
-        except ValueError:
-            arguments.logger.critical('Could not get JSON from response')
-            sys.exit(-1)
-        if 'error_msg' in r:
-            arguments.logger.error('Error: %s' % r['error_msg'])
-            sys.exit(-1)
-
-        return r
+    # -- pure conversions --------------------------------------------------
 
     @staticmethod
-    def acpcify_actions(actions):
+    def acpcify_actions(actions: str):
+        """Convert Slumbot's street-local action string to cumulative ACPC actions."""
         actions = actions.replace("b", "r")
         actions = actions.replace("k", "c")
         streets = actions.split("/")
@@ -185,21 +296,22 @@ class SlumbotGame(object):
                     continue
             max_bet = max_street_bet
             if max_bet == 0:
-                max_bet = 100
+                max_bet = BIG_BLIND
             good_string = "".join(bets)
             streets[i] = good_string
         return "/".join(streets), max_bet
 
     @staticmethod
-    def parse_action(action):
+    def parse_action(action: str) -> dict:
+        """Slumbot's reference action parser.
+
+        Returns a dict with information about the action passed in, or a dict
+        with an ``error`` key if there was a problem parsing the action.
+        ``pos`` is -1 if the hand is over; otherwise the position of the player
+        next to act. ``street_last_bet_to`` only counts chips bet on this
+        street, ``total_last_bet_to`` counts all chips put into the pot.
+        Handles action with or without a final '/'; e.g., "ck" or "ck/".
         """
-            Returns a dict with information about the action passed in.
-            Returns a key "error" if there was a problem parsing the action.
-            pos is returned as -1 if the hand is over; otherwise the position of the player next to act.
-            street_last_bet_to only counts chips bet on this street, total_last_bet_to counts all
-              chips put into the pot.
-            Handles action with or without a final '/'; e.g., "ck" or "ck/".
-            """
         st = 0
         street_last_bet_to = BIG_BLIND
         total_last_bet_to = BIG_BLIND
@@ -293,7 +405,7 @@ class SlumbotGame(object):
                 last_bettor = -1
             elif c == 'f':
                 if last_bet_size == 0:
-                    return {'error', 'Illegal fold'}
+                    return {'error': 'Illegal fold'}
                 if i != sz:
                     return {'error': 'Extra characters at end of action'}
                 pos = -1
@@ -350,5 +462,3 @@ class SlumbotGame(object):
             'last_bet_size': last_bet_size,
             'last_bettor': last_bettor,
         }
-
-

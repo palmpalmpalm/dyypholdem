@@ -68,7 +68,10 @@ resume_training = False
 
 """Section Torch"""
 # flag to use GPU for calculations
-use_gpu = True
+runtime_device = os.environ.get("DYYPHOLDEM_DEVICE", "cuda").strip().lower()
+if runtime_device not in ("cuda", "cpu"):
+    raise RuntimeError("DYYPHOLDEM_DEVICE must be cuda or cpu")
+use_gpu = runtime_device == "cuda"
 # CUDA Graph replay is experimental and remains opt-in until strict GPU A/B
 # validation has passed. "auto" falls back before computation when a solve is
 # ineligible; "required" fails instead of silently using the eager loop.

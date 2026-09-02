@@ -186,9 +186,15 @@ You can play manually against DyypHoldem via an ACPC server. Details on ACPC as 
 
 ## DyypHoldem vs. Slumbot
 
-DyppHoldem also includes a player that can play against [Slumbot](https://www.slumbot.com/) using its API.
+DyypHoldem also includes a player that can play against [Slumbot](https://www.slumbot.com/) using its API.
 
 1. `cd src`
 2. `python player/dyypholdem_slumbot_player.py <hands>`
 
 Specify the number of `<hands>` you like DyypHoldem to play and enjoy the show :-).
+
+Optional flags record the same telemetry as the ACPC player: `--seed`,
+`--telemetry`, `--report`, `--text-report`, `--events`, and `--summary`.
+`make slumbot-benchmark` runs a guarded 1,000-hand match on a throwaway
+Secure RTX 4090 with a spend cap; see `docs/slumbot-benchmark-2026-09-02.md`.
+Set `DYYPHOLDEM_DEVICE=cpu` to run the solver on CPU for local smoke tests.
