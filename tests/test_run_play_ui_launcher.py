@@ -164,6 +164,25 @@ class RunPlayUiLauncherTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
 
+    def test_cfr_iteration_knob_is_reported_and_validated(self):
+        env = os.environ.copy()
+        env.update({"DYYPHOLDEM_UI_OPPONENT": "slumbot", "DYYPHOLDEM_CFR_ITERS": "2000"})
+        result = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True, env=env)
+        self.assertIn("CFR iterations: 2000 with half skipped", result.stdout)
+        self.assertIn("2000 CFR iterations", result.stdout)
+        default = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True)
+        self.assertIn("CFR iterations: 1000 with half skipped", default.stdout)
+        for overrides, message in (
+            ({"DYYPHOLDEM_CFR_ITERS": "lots"}, "DYYPHOLDEM_CFR_ITERS"),
+            ({"DYYPHOLDEM_CFR_ITERS": "2000", "DYYPHOLDEM_CFR_SKIP_ITERS": "2000"}, "must be smaller than"),
+        ):
+            with self.subTest(overrides=overrides):
+                env = os.environ.copy()
+                env.update(overrides)
+                result = subprocess.run([str(LAUNCHER), "dry-run"], check=False, capture_output=True, text=True, env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
     def test_guard_above_six_hours_or_unknown_opponent_is_rejected(self):
         for overrides, message in (
             ({"DYYPHOLDEM_UI_GUARD_SECONDS": "21601"}, "900 through 21600"),

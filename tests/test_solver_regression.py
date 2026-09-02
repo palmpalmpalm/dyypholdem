@@ -676,5 +676,43 @@ class SolverRegressionTest(unittest.TestCase):
             compare_snapshots(baseline, candidate)
 
 
+
+class CfrIterationEnvironmentTest(unittest.TestCase):
+    """arguments.py reads the iteration counts from the environment, fail-closed."""
+
+    def read(self, **env):
+        import subprocess
+
+        source = (
+            "import settings.arguments as a; print(a.cfr_iters, a.cfr_skip_iters)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", source],
+            cwd=str(PROJECT_DIR / "src"),
+            env={**os.environ, "DYYPHOLDEM_DEVICE": "cpu", **env},
+            capture_output=True,
+            text=True,
+        )
+        return result
+
+    def test_defaults_and_overrides(self):
+        self.assertIn("1000 500", self.read().stdout)
+        self.assertIn("2000 1000", self.read(DYYPHOLDEM_CFR_ITERS="2000").stdout)
+        self.assertIn(
+            "2000 400",
+            self.read(DYYPHOLDEM_CFR_ITERS="2000", DYYPHOLDEM_CFR_SKIP_ITERS="400").stdout,
+        )
+
+    def test_invalid_values_fail_closed(self):
+        for env, message in (
+            ({"DYYPHOLDEM_CFR_ITERS": "many"}, "must be an integer"),
+            ({"DYYPHOLDEM_CFR_ITERS": "0"}, "must be at least 1"),
+            ({"DYYPHOLDEM_CFR_SKIP_ITERS": "1000"}, "must be smaller than"),
+        ):
+            with self.subTest(env=env):
+                result = self.read(**env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
 if __name__ == "__main__":
     unittest.main()

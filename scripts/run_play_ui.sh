@@ -40,6 +40,8 @@ SESSION_STATUS_HELPER="$PROJECT_DIR/scripts/slumbot_session_status.py"
 GPU_REGRESSION="${DYYPHOLDEM_UI_GPU_REGRESSION:-1}"
 GRAPH_GATE="${DYYPHOLDEM_UI_GRAPH_GATE:-0}"
 OPPONENT_BET_SIZING="${DYYPHOLDEM_OPPONENT_BET_SIZING:-}"
+CFR_ITERS="${DYYPHOLDEM_CFR_ITERS:-}"
+CFR_SKIP_ITERS="${DYYPHOLDEM_CFR_SKIP_ITERS:-}"
 MATCH_CUDA_GRAPHS="off"
 MPS="${DYYPHOLDEM_UI_MPS:-0}"
 MODEL_ROOT="${DYYPHOLDEM_COMPACT_MODEL_PATH:-$PROJECT_DIR/runs/model-recovery/compact}"
@@ -177,6 +179,12 @@ validate_config() {
     ""|[0-9.,]*) ;;
     *) echo "DYYPHOLDEM_OPPONENT_BET_SIZING must be a comma-separated list of pot fractions" >&2; return 1 ;;
   esac
+  [ -z "$CFR_ITERS" ] || validate_uint DYYPHOLDEM_CFR_ITERS "$CFR_ITERS" 1 100000
+  [ -z "$CFR_SKIP_ITERS" ] || validate_uint DYYPHOLDEM_CFR_SKIP_ITERS "$CFR_SKIP_ITERS" 0 99999
+  if [ -n "$CFR_ITERS" ] && [ -n "$CFR_SKIP_ITERS" ] && [ "$CFR_SKIP_ITERS" -ge "$CFR_ITERS" ]; then
+    echo "DYYPHOLDEM_CFR_SKIP_ITERS must be smaller than DYYPHOLDEM_CFR_ITERS" >&2
+    return 1
+  fi
   [ "$CLOUD_TYPE" = "SECURE" ] || [ "$CLOUD_TYPE" = "COMMUNITY" ] || {
     echo "DYYPHOLDEM_GPU_CLOUD_TYPE must be SECURE or COMMUNITY" >&2
     return 1
@@ -708,15 +716,15 @@ if [ "$COMMAND" = "dry-run" ]; then
   validate_config
   if [ "$LBR_MODE" = 1 ]; then
     dry_run_service="none; local ACPC dealer only"
-    dry_run_solver="real ACPC dealer + ContinualResolving publishing full-hand strategies, 1,000 CFR iterations"
+    dry_run_solver="real ACPC dealer + ContinualResolving publishing full-hand strategies, ${CFR_ITERS:-1000} CFR iterations"
     dry_run_opponent="lbr (local best response, call-down, raise menu $LBR_RAISE_MENU, $HANDS hands, dealer seed $SEED)"
   elif [ "$SLUMBOT_MODE" = 1 ]; then
     dry_run_service="none; the bot connects out to https://slumbot.com/api"
-    dry_run_solver="ContinualResolving versus Slumbot's public HUNL API, 1,000 CFR iterations"
+    dry_run_solver="ContinualResolving versus Slumbot's public HUNL API, ${CFR_ITERS:-1000} CFR iterations"
     dry_run_opponent="slumbot ($HANDS hands over $SESSIONS concurrent session(s), bot seed $SEED, no web bundle required)"
   else
     dry_run_service="authenticated HTTPS proxy on port $HTTP_PORT"
-    dry_run_solver="real ACPC dealer + ContinualResolving, 1,000 CFR iterations"
+    dry_run_solver="real ACPC dealer + ContinualResolving, ${CFR_ITERS:-1000} CFR iterations"
     dry_run_opponent="$OPPONENT${OPPONENT_SEED:+ (seed $OPPONENT_SEED)}"
   fi
   printf '%s\n' \
@@ -731,6 +739,7 @@ if [ "$COMMAND" = "dry-run" ]; then
     "  CUDA Graph gate: $GRAPH_GATE (bitwise off-versus-required capture on all public nodes; match uses auto mode only if it passes)" \
     "  opponent bet sizing: ${OPPONENT_BET_SIZING:-default pot-only tree}" \
     "  NVIDIA MPS for concurrent sessions: $MPS" \
+    "  CFR iterations: ${CFR_ITERS:-1000} with ${CFR_SKIP_ITERS:-half} skipped" \
     "  controller: detached locally; start waits up to $CONTROLLER_READY_WAIT_SECONDS seconds for PLAY_UI_READY" \
     "  hard guard: $GUARD_SECONDS seconds; authenticated remote retry-delete plus independent local stop/delete watchdog" \
     "  spend cap: ${MAX_TOTAL_COST_USD:-not configured} USD projected maximum compute cost" \
@@ -982,7 +991,7 @@ fi
 if [ "$GRAPH_GATE" = 1 ]; then
   echo "running fail-closed CUDA Graph gate: eager versus required replay on all public nodes"
   for graph_mode in off required; do
-    "${SSH[@]}" dyyui "export DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING'; cd /root/dyypholdem && timeout 2400s python3 scripts/solver_regression.py capture --device cuda --cuda-graphs $graph_mode --iterations 1000 --skip-iterations 500 --warmups 1 --repeats 3 --threads 1 --output runs/play-ui/$RUN_NAME/graph-gate-$graph_mode.json > runs/play-ui/$RUN_NAME/graph-gate-$graph_mode.log 2>&1"
+    "${SSH[@]}" dyyui "export DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING'; cd /root/dyypholdem && timeout 3600s python3 scripts/solver_regression.py capture --device cuda --cuda-graphs $graph_mode --iterations ${CFR_ITERS:-1000} --skip-iterations ${CFR_SKIP_ITERS:-$(( ${CFR_ITERS:-1000} / 2 ))} --warmups 1 --repeats 3 --threads 1 --output runs/play-ui/$RUN_NAME/graph-gate-$graph_mode.json > runs/play-ui/$RUN_NAME/graph-gate-$graph_mode.log 2>&1"
   done
   "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 scripts/solver_regression.py compare --baseline runs/play-ui/$RUN_NAME/graph-gate-off.json --candidate runs/play-ui/$RUN_NAME/graph-gate-required.json --require-bitwise --max-runtime-ratio 1.10 --output runs/play-ui/$RUN_NAME/graph-gate-comparison.json > runs/play-ui/$RUN_NAME/graph-gate-comparison.log 2>&1"
   "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 -c 'import json; p=json.load(open(\"runs/play-ui/$RUN_NAME/graph-gate-required.json\")); spots=p[\"spots\"]; assert len(spots) >= 4, len(spots); [None for s in spots for r in s[\"timing\"][\"solver_repeats\"] if not (r.get(\"cuda_graph_used\") is True and r.get(\"cuda_graph_reason\") == \"enabled\")] if False else None; bad=[(s[\"name\"], r.get(\"cuda_graph_reason\")) for s in spots for r in s[\"timing\"].get(\"solver_repeats\", []) if r.get(\"cuda_graph_used\") is not True]; assert not bad, bad'"
@@ -993,10 +1002,10 @@ fi
 if [ "$SLUMBOT_MODE" = 1 ]; then
   if [ "$LBR_MODE" = 1 ]; then
     echo "starting dealer, strategy-publishing resolver, and local best response"
-    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_LBR_RAISE_MENU='$LBR_RAISE_MENU'; cd /root/dyypholdem && ./scripts/start_lbr_remote.sh '$RUN_NAME' '$HANDS' '$SEED'"
+    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_LBR_RAISE_MENU='$LBR_RAISE_MENU' DYYPHOLDEM_CFR_ITERS='$CFR_ITERS' DYYPHOLDEM_CFR_SKIP_ITERS='$CFR_SKIP_ITERS'; cd /root/dyypholdem && ./scripts/start_lbr_remote.sh '$RUN_NAME' '$HANDS' '$SEED'"
   else
     echo "starting real continual resolver against Slumbot"
-    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_UI_MPS='$MPS'; cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED' '$SESSIONS'"
+    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_UI_MPS='$MPS' DYYPHOLDEM_CFR_ITERS='$CFR_ITERS' DYYPHOLDEM_CFR_SKIP_ITERS='$CFR_SKIP_ITERS'; cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED' '$SESSIONS'"
   fi
 else
   echo "starting dealer, authenticated UI, and real continual resolver"

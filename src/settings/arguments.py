@@ -39,9 +39,26 @@ use_sqlite = False
 
 """Section CFR Iterations"""
 # the number of iterations that DyypHoldem runs CFR for
-cfr_iters = 1000
+def _positive_int_env(name, default):
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be an integer") from error
+    if value < 1:
+        raise RuntimeError(f"{name} must be at least 1")
+    return value
+
+
+cfr_iters = _positive_int_env("DYYPHOLDEM_CFR_ITERS", 1000)
 # the number of preliminary CFR iterations which DyypHoldem doesn't factor into the average strategy (included in cfr_iters)
-cfr_skip_iters = 500
+cfr_skip_iters = _positive_int_env("DYYPHOLDEM_CFR_SKIP_ITERS", cfr_iters // 2)
+if cfr_skip_iters >= cfr_iters:
+    raise RuntimeError(
+        "DYYPHOLDEM_CFR_SKIP_ITERS must be smaller than DYYPHOLDEM_CFR_ITERS"
+    )
 
 
 """Section Data Generation"""
