@@ -699,7 +699,7 @@ class CudaGraphExecutionPlanningTest(unittest.TestCase):
         lookahead._cuda_graph_stream = None
         lookahead.cuda_graph_telemetry = {}
 
-        def iteration(representative):
+        def iteration(representative, capture_iteration=None):
             if state["capturing"]:
                 state["captured"].append(representative)
                 active_graph.representative = representative

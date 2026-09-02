@@ -89,6 +89,8 @@ class Lookahead(object):
         self.preflop_next_street_action_indices = None
         self.preflop_next_street_action_slots = {}
         self.preflop_next_street_input_count = 0
+        self._current_iteration = 0
+        self._capture_iteration = None
         self._cuda_graph_handles = []
         self._cuda_graph_stream = None
         self.cuda_graph_telemetry = self._new_cuda_graph_telemetry()
@@ -172,18 +174,24 @@ class Lookahead(object):
             game_settings.hand_count,
         )
 
-    def _capture_preflop_next_street_inputs(self):
+    def _capture_preflop_next_street_inputs(self, iteration):
         if (
-            self.preflop_next_street_inputs is None
+            getattr(self, "preflop_next_street_inputs", None) is None
             or self.preflop_next_street_action_indices is None
             or self.next_board_idx is not None
-            or self.next_street_boxes.iter < arguments.cfr_skip_iters
+            or iteration is None
+            or int(iteration) <= arguments.cfr_skip_iters
         ):
             return
+        if (
+            hasattr(torch.cuda, "is_current_stream_capturing")
+            and torch.cuda.is_available()
+            and torch.cuda.is_current_stream_capturing()
+        ):
+            # Never record an iteration-indexed copy into a CUDA Graph.
+            return
 
-        capture_index = (
-            self.next_street_boxes.iter - arguments.cfr_skip_iters
-        )
+        capture_index = int(iteration) - arguments.cfr_skip_iters - 1
         if capture_index >= self.preflop_next_street_inputs.size(0):
             return
         if capture_index != self.preflop_next_street_input_count:
@@ -403,13 +411,25 @@ class Lookahead(object):
                         "the solve was aborted without eager fallback"
                     ) from error
 
+        self._finalize_iteration_accounting()
+
         # 2.0 at the end normalize average strategy
         self._compute_normalize_average_strategies()
         # 2.1 normalize root's CFVs
         self._compute_normalize_average_cfvs()
 
-    def _compute_iteration(self, iteration):
-        """Run one CFR iteration in the legacy operator order."""
+    def _compute_iteration(self, iteration, capture_iteration=None):
+        """Run one CFR iteration in the legacy operator order.
+
+        ``iteration`` selects the CFR phase (burn-in versus averaging) and is
+        the value a CUDA Graph capture bakes into its kernels.
+        ``capture_iteration`` is the true iteration number used only by the
+        eager preflop trajectory copy; ``0`` disables that copy.
+        """
+        self._current_iteration = int(iteration)
+        self._capture_iteration = (
+            int(iteration) if capture_iteration is None else int(capture_iteration)
+        )
         self._set_opponent_starting_range()
         self._compute_current_strategies()
         self._compute_ranges()
@@ -471,10 +491,11 @@ class Lookahead(object):
             return "gpu-disabled"
         if not torch.cuda.is_available():
             return "cuda-unavailable"
-        if self.tree.street != constants.streets_count:
-            return "river-only"
-        if self.next_street_boxes is not None:
-            return "next-street-box-present"
+        boxes = self.next_street_boxes
+        if boxes is not None and not bool(
+            getattr(boxes, "supports_explicit_iteration", False)
+        ):
+            return "next-street-box-lacks-iteration-api"
         if not hasattr(torch.cuda, "CUDAGraph") or not hasattr(
             torch.cuda, "graph"
         ):
@@ -515,8 +536,15 @@ class Lookahead(object):
             with torch.cuda.stream(graph_stream):
                 for phase in plan:
                     representative = phase["representative_iteration"]
+                    # The kernels replay the representative iteration, but the
+                    # eager preflop trajectory copy needs the true iteration
+                    # number so every averaging iteration lands in its own slot.
+                    true_iteration = int(representative)
                     for _ in range(phase["eager_iterations"]):
-                        self._compute_iteration(representative)
+                        self._compute_iteration(
+                            representative, capture_iteration=true_iteration
+                        )
+                        true_iteration += 1
 
                     if phase["captures"]:
                         # PyTorch requires graph warmup to finish on the side
@@ -525,10 +553,18 @@ class Lookahead(object):
                         graph_stream.synchronize()
                         graph = torch.cuda.CUDAGraph()
                         with torch.cuda.graph(graph, stream=graph_stream):
-                            self._compute_iteration(representative)
+                            # Recording only: the trajectory copy is disabled
+                            # so no iteration-indexed write is baked in.
+                            self._compute_iteration(
+                                representative, capture_iteration=0
+                            )
                         graphs.append(graph)
                         for _ in range(phase["replays"]):
                             graph.replay()
+                            # One eager index_select per replay, ordered after
+                            # the replay on the same side stream.
+                            self._capture_preflop_next_street_inputs(true_iteration)
+                            true_iteration += 1
 
             # Surface asynchronous replay faults and make queued mutations safe
             # before the method returns or graph-owned tensors can be released.
@@ -559,6 +595,17 @@ class Lookahead(object):
                 ),
             }
         )
+
+    def _finalize_iteration_accounting(self):
+        """Make post-solve state independent of how the iterations ran.
+
+        CUDA Graph replays never execute Python, so the value box's own
+        iteration counter stops at the last eager call. Every consumer of the
+        box after the solve expects the full iteration count.
+        """
+        boxes = getattr(self, "next_street_boxes", None)
+        if boxes is not None and hasattr(boxes, "iter"):
+            boxes.iter = int(arguments.cfr_iters)
 
     def _ensure_iteration_buffers(self):
         """Allocate reduction outputs once instead of once per CFR iteration."""
@@ -693,12 +740,14 @@ class Lookahead(object):
             self.next_street_boxes_inputs[:, :, 1, :].copy_(self.next_street_boxes_outputs[:, :, 0, :])
 
         if self.tree.street == 1:
-            self._capture_preflop_next_street_inputs()
+            self._capture_preflop_next_street_inputs(self._capture_iteration)
             self.next_street_boxes.get_value_aux(self.next_street_boxes_inputs.view(-1, constants.players_count, game_settings.hand_count),
-                                                 self.next_street_boxes_outputs.view(-1, constants.players_count, game_settings.hand_count), self.next_board_idx)
+                                                 self.next_street_boxes_outputs.view(-1, constants.players_count, game_settings.hand_count), self.next_board_idx,
+                                                 iteration=self._current_iteration)
         else:
             self.next_street_boxes.get_value(self.next_street_boxes_inputs.view(-1, constants.players_count, game_settings.hand_count),
-                                             self.next_street_boxes_outputs.view(-1, constants.players_count, game_settings.hand_count))
+                                             self.next_street_boxes_outputs.view(-1, constants.players_count, game_settings.hand_count),
+                                             iteration=self._current_iteration)
 
         # now the neural net outputs for P1 and P2 respectively, so we need to swap the output values if necessary
         if self.tree.current_player == constants.Players.P2:

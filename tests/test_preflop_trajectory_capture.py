@@ -265,20 +265,20 @@ class PreflopTrajectoryLifecycleTest(unittest.TestCase):
         ):
             cached_root = self._lookahead(shared_box, first_inputs, 4)
             cached_root._prepare_preflop_next_street_inputs()
-            cached_root._capture_preflop_next_street_inputs()
+            cached_root._capture_preflop_next_street_inputs(shared_box.iter + 1)
             shared_box.iter = 3
             cached_root.next_street_boxes_inputs.add_(100)
-            cached_root._capture_preflop_next_street_inputs()
+            cached_root._capture_preflop_next_street_inputs(shared_box.iter + 1)
             cached_snapshot = cached_root.preflop_next_street_inputs.clone()
             cached_pointer = cached_root.preflop_next_street_inputs.data_ptr()
 
             shared_box.iter = 2
             fresh_resolve = self._lookahead(shared_box, second_inputs, 4)
             fresh_resolve._prepare_preflop_next_street_inputs()
-            fresh_resolve._capture_preflop_next_street_inputs()
+            fresh_resolve._capture_preflop_next_street_inputs(shared_box.iter + 1)
             shared_box.iter = 3
             fresh_resolve.next_street_boxes_inputs.add_(100)
-            fresh_resolve._capture_preflop_next_street_inputs()
+            fresh_resolve._capture_preflop_next_street_inputs(shared_box.iter + 1)
 
         self.assertTrue(
             torch.equal(cached_root.preflop_next_street_inputs, cached_snapshot)

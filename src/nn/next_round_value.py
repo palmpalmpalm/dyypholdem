@@ -61,6 +61,13 @@ class NextRoundValue(object):
     _range_matrix: torch.Tensor
     _reverse_value_matrix: torch.Tensor
     _values_are_prepared: bool = False
+    # The lookahead may drive iteration numbers explicitly so that CUDA Graph
+    # warmups can replay one representative iteration without advancing
+    # this box's own counter.
+    supports_explicit_iteration: bool = True
+    next_round_inputs = None
+    range_normalization_memory = None
+    counterfactual_value_memory = None
 
     iter: int
     pot_sizes: torch.Tensor
@@ -224,6 +231,13 @@ class NextRoundValue(object):
     # -- betting round ends
     def start_computation(self, pot_sizes, batch_size):
         self.iter = 0
+        # Per-solve buffers are allocated on first use and must survive
+        # repeated calls with the same iteration number, so they are reset
+        # here instead of being re-created whenever ``iter == 1``.
+        self.next_round_inputs = None
+        self.range_normalization_memory = None
+        self.counterfactual_value_memory = None
+        self._values_are_prepared = False
         self.pot_sizes = pot_sizes.view(-1, 1).clone()
         self.pot_sizes = self.pot_sizes.expand(self.pot_sizes.size(0),batch_size).clone()
         self.pot_sizes = self.pot_sizes.view(-1, 1)
@@ -242,11 +256,14 @@ class NextRoundValue(object):
     # -- K is the number of private hands. Contains N sets of 2 range vectors.
     # -- @param values an Nx2xK tensor in which to store the N sets of 2 value vectors
     # -- which are output
-    def get_value(self, ranges, values):
+    def get_value(self, ranges, values, iteration=None):
         assert ranges.size(0) == self.batch_size
 
-        self.iter = self.iter + 1
-        if self.iter == 1:
+        if iteration is None:
+            self.iter = self.iter + 1
+        else:
+            self.iter = int(iteration)
+        if self.next_round_inputs is None:
             # initializing data structures
             self.next_round_inputs = arguments.Tensor(self.batch_size, self.board_count, (self.bucket_count * constants.players_count + 1)).zero_()
             self.next_round_values = arguments.Tensor(self.batch_size, self.board_count, constants.players_count,  self.bucket_count ).zero_()
@@ -268,7 +285,7 @@ class NextRoundValue(object):
 
         #   we need to find if we need remember something in this iteration
         use_memory = self.iter > arguments.cfr_skip_iters
-        if use_memory and self.iter == arguments.cfr_skip_iters + 1:
+        if use_memory and self.range_normalization_memory is None:
             # first iter that we need to remember something - we need to init data structures
             self.range_normalization_memory = arguments.Tensor(self.batch_size * self.board_count * constants.players_count, 1).zero_()
             self.counterfactual_value_memory = arguments.Tensor(self.batch_size, constants.players_count, self.board_count, self.bucket_count).zero_()
@@ -294,7 +311,7 @@ class NextRoundValue(object):
             self.range_normalization_memory.add_(self.value_normalization.view(self.range_normalization_memory.shape))
 
         # eliminating division by zero
-        self.range_normalization[torch.eq(self.range_normalization, 0)] = 1
+        self.range_normalization.masked_fill_(torch.eq(self.range_normalization, 0), 1)
         self.next_round_serialized_range.div_(self.range_normalization.view(-1, 1).expand_as(self.next_round_serialized_range))
         serialized_range_by_player = self.next_round_serialized_range.view(self.batch_size, constants.players_count, self.board_count, self.bucket_count)
 
@@ -355,7 +372,7 @@ class NextRoundValue(object):
             return
 
         # eliminating division by zero
-        self.range_normalization_memory[torch.eq(self.range_normalization_memory, 0)] = 1
+        self.range_normalization_memory.masked_fill_(torch.eq(self.range_normalization_memory, 0), 1)
         serialized_memory_view = self.counterfactual_value_memory.view(-1, self.bucket_count)
         serialized_memory_view.div_(self.range_normalization_memory.expand_as(serialized_memory_view))
 
