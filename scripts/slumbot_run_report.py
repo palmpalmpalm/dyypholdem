@@ -124,12 +124,15 @@ def build_report(run_dir: Path, summary_name: str = "slumbot-summary.json", even
             "response_max": max(response) if response else None,
             "cfr_mean": statistics.fmean(cfr) if cfr else None,
         }
+    def seat(row):
+        position = row.get("client_pos", row.get("position"))
+        return "small_blind" if position == 1 else "big_blind"
+
     seat_counts = {"small_blind": 0, "big_blind": 0}
-    for row in results:
-        seat_counts["small_blind" if row.get("client_pos") == 1 else "big_blind"] += 1
     seat_chips = {"small_blind": 0, "big_blind": 0}
     for row in results:
-        seat_chips["small_blind" if row.get("client_pos") == 1 else "big_blind"] += int(row["winnings"])
+        seat_counts[seat(row)] += 1
+        seat_chips[seat(row)] += int(row["winnings"])
 
     return {
         "run_dir": str(run_dir),

@@ -68,4 +68,24 @@ python3 scripts/slumbot_run_report.py --run-dir runs/play-ui/<run> \
 
 ## Results
 
-Pending: no LBR match has been run yet.
+Two guarded attempts on 2026-09-02 validated the harness end to end but did
+not complete a measurement.
+
+- `dyypholdem-lbr-20260902T105614Z` played 35 hands before both ACPC clients
+  died on a pre-existing bug: a called flop all-in makes the dealer deal the
+  turn and river with empty action lists, and the debug repr of the parsed
+  state indexed the previous street's empty list. Slumbot hands never reach
+  that state, an LBR that shoves finds it within 35 hands. Fixed with a
+  regression test on the exact message.
+- `dyypholdem-lbr-20260902T111054Z` played 13 clean hands with the fix and
+  was then stopped by RunPod because the account balance reached zero; the
+  provider also stopped the other lane's pod. The next launch after a top-up
+  is `DYYPHOLDEM_UI_GRAPH_GATE=1 make lbr-benchmark`.
+
+Across the 48 hands the channel bookkeeping never waited or mismatched, the
+bot's telemetry and the LBR summary were exactly zero-sum, and LBR chose
+all-in in 36 of 104 decisions, call in 55, fold in 13. LBR was ahead by
+3,200 chips, which at that sample size says nothing beyond "the bot folds the
+blinds to most shoves", as call-down LBR is designed to probe. Every bot
+decision in those hands replayed CUDA Graphs after the on-pod gate passed on
+the default tree (its third bitwise pass of the day).

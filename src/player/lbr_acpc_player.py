@@ -104,7 +104,7 @@ class LbrMatch:
                     self.cumulative_winnings += int(hand_winnings)
                     self.hand_winnings.append(int(hand_winnings))
                     self._event({"event": "hand_result", "hand_number": hand_number, "winnings": int(hand_winnings),
-                                 "cumulative_winnings": self.cumulative_winnings})
+                                 "cumulative_winnings": self.cumulative_winnings, "position": int(state.position)})
                     self.logger.success(f"Hand {hand_number} completed. LBR winnings: {hand_winnings}, total: {self.cumulative_winnings} ({self.hands_completed}/{self.expected_hands})")
                     self._write_summary()
                     if self.hands_completed >= self.expected_hands:
