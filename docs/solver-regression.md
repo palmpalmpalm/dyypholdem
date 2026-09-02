@@ -291,6 +291,37 @@ solver device so CUDA Graph replays advance it. The default `cfr+` runs the
 legacy loop with no extra kernels. Captures record `cfr_variant` in their
 configuration.
 
+### 2026-09-02 CPU Convergence Probe
+
+Reference: the current solver (`cfr+`, default tree) at 4,000 iterations with
+2,000 skipped, one repeat, all four public nodes. Candidates were compared with
+`--allow-iteration-change` and every threshold relaxed so the comparison
+reports deviations instead of failing. Range-weighted root-strategy L1 and the
+range-weighted argmax disagreement against that reference:
+
+| Node | cfr+ 1000/500 | cfr+ 500/250 | dcfr 1000/500 | dcfr 500/250 |
+|---|---:|---:|---:|---:|
+| preflop-root | 0.143 / 2.7% | 0.248 / 5.4% | 0.122 / 4.5% | 0.248 / 10.3% |
+| flop-3cAdKc | 0.089 / 2.9% | 0.145 / 4.3% | 0.091 / 3.7% | 0.152 / 6.6% |
+| turn-3c5h4h3h | 0.074 / 3.0% | 0.136 / 5.4% | 0.059 / 3.1% | 0.111 / 4.4% |
+| river-7d7c8s5sQd | 0.019 / 0.4% | 0.093 / 1.4% | 0.034 / 0.4% | 0.103 / 0.8% |
+
+Root-EV deltas from the reference, in chips: cfr+ 1000 `0.008 / 0.090 /
+0.005 / 0.191`; dcfr 1000 `0.013 / 0.275 / 0.043 / 0.684`; cfr+ 500 `0.041 /
+0.199 / 0.127 / 0.947`; dcfr 500 `0.107 / 0.418 / 0.081 / 0.437`.
+
+Reading: with the skip-based averaging kept as it is, regret discounting does
+not bring 500 iterations closer to the reference than plain CFR+ at 500, and at
+1,000 iterations it is level on strategy distance while worse on argmax
+agreement and root EV. The reference is itself a CFR+ trajectory, so a variant
+converging to a different point of the same equilibrium set would look the
+same as one converging more slowly; without an exploitability measure the
+probe cannot separate those. The variant therefore stays opt-in and gets no
+GPU budget. The more useful number is the first column: production's 1,000
+iterations still sit 2-3% of range-weighted argmax decisions away from the
+4,000-iteration solve on every non-river node, which is where time saved by
+CUDA Graph replay could go.
+
 ## Iteration Sweeps
 
 Iteration changes are rejected unless explicitly acknowledged. Capture each
