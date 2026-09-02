@@ -82,7 +82,52 @@ not complete a measurement.
   provider also stopped the other lane's pod. The next launch after a top-up
   is `DYYPHOLDEM_UI_GRAPH_GATE=1 make lbr-benchmark`.
 
-Across the 48 hands the channel bookkeeping never waited or mismatched, the
+### `dyypholdem-lbr-20260902T135954Z`: 1,000 hands, pot and all-in menu
+
+The first complete match. All 1,000 hands validated, zero-sum against the
+bot's telemetry, no channel waits, 7.8 s/hand.
+
+| Metric | Value |
+|---|---:|
+| LBR result | −326 mbb/hand, 95% CI ±2,292 |
+| Per-hand standard deviation | 3,698 chips (37 big blinds) |
+| Hands won / lost / tied by LBR | 708 / 278 / 14 |
+| LBR as small blind (chips) | 500 hands, +78,600 |
+| LBR as big blind (chips) | 500 hands, −111,150 |
+
+**The measurement is inconclusive, and the reason is the raise formula.** LBR
+lost, but a negative LBR result never means the bot is unexploitable; it means
+this LBR variant is a poor exploiter. Splitting the hands shows where the
+result comes from:
+
+| Hands | Count | Net chips |
+|---|---:|---:|
+| LBR shoved at some point | 668 | −32,500 |
+| LBR never shoved | 332 | −50 |
+
+Every chip LBR lost, it lost in hands where it shoved, and it shoved with a
+median equity of +0.18 with 54% of shoves below +0.20. That follows directly
+from the call-down value of a raise, `R·eq + own commitment`: with `R` the
+20,000 stack, any positive equity produces a huge number, so all-in dominates
+calling on thin edges. The formula credits no fold equity and, more
+importantly, charges nothing for the fact that the bot folds its worst hands
+and calls a shove with a range far stronger than the +0.18 average LBR
+measured against its whole range.
+
+The proper LBR raise value (Lisý and Bowling) weights the opponent's actual
+fold probability at that node and recomputes equity against the range that
+continues. Both quantities require querying the agent at a counterfactual
+node, which the strategy channel cannot supply: it only carries decisions the
+bot actually faced. Supporting that would mean running a second resolver as an
+oracle, one full resolve per candidate action.
+
+The cheap and standard alternative is to restrict the action set. With
+fold and call only, the bound is weaker in principle but the variance
+collapses, since no hand builds a 20,000-chip pot. The 332 non-shoving hands
+above already hint at the answer, being within 50 chips of break-even. The
+next run uses `DYYPHOLDEM_LBR_RAISE_MENU=` (empty).
+
+Across the earlier 48 validation hands the channel bookkeeping never waited or mismatched, the
 bot's telemetry and the LBR summary were exactly zero-sum, and LBR chose
 all-in in 36 of 104 decisions, call in 55, fold in 13. LBR was ahead by
 3,200 chips, which at that sample size says nothing beyond "the bot folds the
