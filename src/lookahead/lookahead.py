@@ -91,6 +91,9 @@ class Lookahead(object):
         self.preflop_next_street_input_count = 0
         self._current_iteration = 0
         self._capture_iteration = None
+        self._dcfr_iteration = None
+        self._dcfr_power = None
+        self._dcfr_discount = None
         self._cuda_graph_handles = []
         self._cuda_graph_stream = None
         self.cuda_graph_telemetry = self._new_cuda_graph_telemetry()
@@ -371,6 +374,7 @@ class Lookahead(object):
     # -- @local
     def _compute(self):
         self._ensure_iteration_buffers()
+        self._prepare_regret_discount()
 
         mode = str(getattr(arguments, "cuda_graph_mode", "off")).lower()
         if mode not in ("off", "auto", "required"):
@@ -437,6 +441,8 @@ class Lookahead(object):
         self._compute_terminal_equities()
         self._compute_cfvs()
         self._compute_regrets()
+        if getattr(self, "_dcfr_iteration", None) is not None:
+            self._apply_regret_discount()
         self._compute_cumulate_average_cfvs(iteration)
 
     def _compute_eager(self):
@@ -595,6 +601,38 @@ class Lookahead(object):
                 ),
             }
         )
+
+    def _prepare_regret_discount(self):
+        """Allocate the device-side iteration counter for the dcfr variant.
+
+        The counter lives on the solver device so a CUDA Graph replay advances
+        it without any host-side iteration number; the legacy cfr+ path
+        allocates nothing and runs no extra kernels.
+        """
+        if str(getattr(arguments, "cfr_variant", "cfr+")).lower() != "dcfr":
+            self._dcfr_iteration = None
+            return
+        prototype = self.regrets_data[2]
+        if self._dcfr_iteration is None or self._dcfr_iteration.device != prototype.device:
+            self._dcfr_iteration = torch.zeros((), dtype=prototype.dtype, device=prototype.device)
+            self._dcfr_power = torch.zeros((), dtype=prototype.dtype, device=prototype.device)
+            self._dcfr_discount = torch.zeros((), dtype=prototype.dtype, device=prototype.device)
+        else:
+            self._dcfr_iteration.zero_()
+
+    def _apply_regret_discount(self):
+        """Discount accumulated regrets by t^alpha / (t^alpha + 1)."""
+        alpha = float(getattr(arguments, "dcfr_alpha", 1.5))
+        self._dcfr_iteration.add_(1.0)
+        torch.pow(self._dcfr_iteration, alpha, out=self._dcfr_power)
+        torch.add(self._dcfr_power, 1.0, out=self._dcfr_discount)
+        torch.div(self._dcfr_power, self._dcfr_discount, out=self._dcfr_discount)
+        for d in range(2, self.depth + 1):
+            self.regrets_data[d].mul_(self._dcfr_discount)
+        gadget = getattr(self, "reconstruction_gadget", None)
+        if gadget is not None and self.reconstruction_opponent_cfvs is not None:
+            gadget.play_regrets.mul_(self._dcfr_discount)
+            gadget.terminate_regrets.mul_(self._dcfr_discount)
 
     def _finalize_iteration_accounting(self):
         """Make post-solve state independent of how the iterations ran.

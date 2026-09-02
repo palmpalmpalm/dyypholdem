@@ -11,6 +11,7 @@ from game.bet_sizing import BetSizing
 
 class PokerTreeBuilder(object):
     bet_sizing: BetSizing
+    root_player = None
     limit_to_street: bool
 
     def __int__(self):
@@ -104,7 +105,11 @@ class PokerTreeBuilder(object):
             children.append(terminal_call_node)
 
         # Action 3: bet
-        possible_bets = self.bet_sizing.get_possible_bets(parent_node)
+        opponent_node = (
+            self.root_player is not None
+            and parent_node.current_player != self.root_player
+        )
+        possible_bets = self.bet_sizing.get_possible_bets(parent_node, opponent_menu=opponent_node)
         if possible_bets.dim() != 0:
             assert (possible_bets.size(1) == 2)
             for i in range(0, possible_bets.size(0)):
@@ -116,6 +121,8 @@ class PokerTreeBuilder(object):
                 bet_node.board = parent_node.board
                 bet_node.board_string = parent_node.board_string
                 bet_node.bets = possible_bets[i]
+                # Track the bet level so per-level menus apply to raises correctly.
+                bet_node.num_bets = parent_node.num_bets + 1
                 children.append(bet_node)
 
         return children
@@ -189,7 +196,17 @@ class PokerTreeBuilder(object):
         root.bets = build_tree_params.root_node.bets.clone()
         root.num_bets = build_tree_params.root_node.num_bets
 
-        root.bet_sizing = build_tree_params.bet_sizing or BetSizing(game_settings.bet_sizing)
+        root.bet_sizing = build_tree_params.bet_sizing or BetSizing(
+            game_settings.bet_sizing,
+            getattr(game_settings, "opponent_bet_sizing", None),
+        )
+        # The player acting at the root is the re-solving player; every node
+        # where the other player acts may use the opponent bet menu.
+        self.root_player = (
+            root.current_player
+            if root.current_player in (constants.Players.P1, constants.Players.P2)
+            else None
+        )
         assert root.bet_sizing, "no bet sizes defined"
         self.bet_sizing = root.bet_sizing
         self.limit_to_street = build_tree_params.limit_to_street

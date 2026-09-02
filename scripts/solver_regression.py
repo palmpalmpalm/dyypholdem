@@ -1447,6 +1447,7 @@ def capture_snapshot(
             "seed": seed,
             "threads": threads,
             "cuda_graph_mode": cuda_graph_mode,
+            "cfr_variant": str(getattr(arguments, "cfr_variant", "cfr+")),
             "cuda_graph_eager_warmups": int(
                 getattr(arguments, "cuda_graph_eager_warmups", 3)
             ),

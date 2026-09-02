@@ -83,6 +83,14 @@ if cuda_graph_mode not in ("off", "auto", "required"):
         "DYYPHOLDEM_CUDA_GRAPHS must be off, auto, or required"
     )
 cuda_graph_eager_warmups = 3
+# Regret update variant. "cfr+" is the legacy loop. "dcfr" additionally
+# discounts accumulated (non-negative) regrets after iteration t by
+# t^alpha / (t^alpha + 1) with alpha = 1.5 (Brown & Sandholm 2019), including
+# the CFR-D gadget regrets; averaging keeps the skip-based uniform window.
+cfr_variant = os.environ.get("DYYPHOLDEM_CFR_VARIANT", "cfr+").strip().lower()
+if cfr_variant not in ("cfr+", "dcfr"):
+    raise RuntimeError("DYYPHOLDEM_CFR_VARIANT must be cfr+ or dcfr")
+dcfr_alpha = 1.5
 # default tensor types
 if not use_gpu:
     Tensor = torch.FloatTensor
