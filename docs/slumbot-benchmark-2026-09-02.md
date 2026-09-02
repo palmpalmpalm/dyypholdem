@@ -92,20 +92,51 @@ the total hand count must divide evenly. The controller aggregates the
 per-session summaries for readiness, progress, failure detection, and final
 validation, and `scripts/slumbot_run_report.py` merges them.
 
-The first four-session run measured the scaling: each session slowed from
-11.9 s/hand solo to about 30 s/hand, so the aggregate was 8.0 s/hand, only
-1.5x the solo throughput, with the RTX 4090 reporting 99% utilization. Four
-CUDA contexts time-slice the GPU rather than overlap their small kernels.
-`DYYPHOLDEM_UI_MPS=1` therefore starts the NVIDIA MPS control daemon on the pod
-before the sessions so kernels from different processes can run concurrently;
-`environment.json` records whether it started. Combined with CUDA Graph replay
-(`DYYPHOLDEM_UI_GRAPH_GATE=1`), which removes most of the per-iteration launch
-overhead that the GPU was spending its time on, this is the path to cheaper
-Slumbot hands.
+### Run `dyypholdem-slumbot-20260902T031543Z`: four sessions, guard-limited
 
-Sizing rule of thumb from the same run: at 8 s/hand aggregate a six-hour guard
-covers about 2,500 hands after setup, so request no more than that per launch
-until the MPS and graph numbers are in.
+Requested 4 x 1,250 hands with the default solver; the six-hour guard ended
+the match after 2,443 hands (about 611 per session), all four sessions clean.
+
+| Metric | Value |
+|---|---:|
+| Hands completed | 2,443 of 5,000 requested |
+| Net chips | +15,150 |
+| Result | +62.0 mbb/hand, SE 322.4, 95% CI ±631.9 |
+| Hands won / lost / tied | 1,256 / 1,161 / 26 |
+| Small blind hands (chips) | 1,220 (+49,100) |
+| Big blind hands (chips) | 1,223 (−33,950) |
+| Hand errors / request retries / bet corrections | 0 / 0 / 0 |
+| Aggregate pace | 8.7 s/hand (1.4x the solo throughput) |
+
+Pooled with the first 1,000-hand run this is −3,200 chips over 3,443 hands,
+about −9 mbb/hand with a 95% interval near ±530: still indistinguishable from
+break-even against Slumbot.
+
+Per-street decision latency under four concurrent sessions, against the solo
+run in parentheses:
+
+| Street | Decisions | Response mean | CFR mean |
+|---|---:|---:|---:|
+| preflop | 2,684 | 3.16 s (2.20 s) | 2.33 s (2.14 s) |
+| flop | 2,064 | 20.00 s (5.52 s) | 4.33 s (4.10 s) |
+| turn | 1,393 | 18.13 s (4.77 s) | 4.13 s (3.92 s) |
+| river | 1,035 | 4.31 s (2.62 s) | 2.79 s (2.52 s) |
+
+The diagnosis is in the split: CFR, which is GPU work, slowed by only 5% to
+10%, while the flop and turn response times grew by 14 seconds. The extra
+time sits in the CPU phases (terminal-equity construction, bucketing
+transforms, lookahead construction), where each process used every core by
+default and four processes oversubscribed the 16 vCPUs. The remote start
+script now gives each session an even share of the cores
+(`OMP_NUM_THREADS` and friends, recorded in `environment.json` as
+`threads_per_session`). `DYYPHOLDEM_UI_MPS=1` additionally starts the NVIDIA
+MPS daemon so the sessions' kernels can overlap on the GPU, which the 99%
+utilization reading suggested was also saturated; `environment.json` records
+whether it started. CUDA Graph replay (`DYYPHOLDEM_UI_GRAPH_GATE=1`) attacks
+the remaining CFR launch overhead.
+
+Sizing rule of thumb until those fixes are measured: at 8.7 s/hand aggregate
+a six-hour guard covers about 2,400 hands after setup.
 
 ## Reading the result
 

@@ -55,6 +55,15 @@ if [ "${DYYPHOLDEM_UI_MPS:-0}" = 1 ]; then
   fi
 fi
 
+# Each session runs CPU tensor work (terminal equity, bucketing transforms,
+# lookahead construction) with every core by default; four sessions on a
+# 16-vCPU pod then oversubscribe the CPU and stall those phases. Give each
+# session an even share of the cores instead.
+CPU_CORES="$(nproc 2>/dev/null || echo 4)"
+THREADS_PER_SESSION=$(( CPU_CORES / SESSIONS ))
+[ "$THREADS_PER_SESSION" -ge 1 ] || THREADS_PER_SESSION=1
+export OMP_NUM_THREADS="$THREADS_PER_SESSION" MKL_NUM_THREADS="$THREADS_PER_SESSION" OPENBLAS_NUM_THREADS="$THREADS_PER_SESSION"
+
 cd "$PROJECT_DIR/src"
 for index in $(seq 0 $(( SESSIONS - 1 ))); do
   SESSION_DIR="$RUN_DIR/session-$index"
@@ -80,7 +89,9 @@ cat > "$RUN_DIR/environment.json" <<EOF2
   "seed": $SEED,
   "opponent": "slumbot",
   "opponent_host": "slumbot.com",
-  "mps": "$MPS_STATUS"
+  "mps": "$MPS_STATUS",
+  "cpu_cores": $CPU_CORES,
+  "threads_per_session": $THREADS_PER_SESSION
 }
 EOF2
 
