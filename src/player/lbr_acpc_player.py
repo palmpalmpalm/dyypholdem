@@ -6,7 +6,7 @@ import sys
 sys.path.append(os.getcwd())
 
 import settings.constants as constants  # noqa: E402
-from player.local_best_response import action_to_bet, summary_statistics  # noqa: E402
+from player.local_best_response import action_to_bet, parse_raise_menu, summary_statistics  # noqa: E402
 
 
 def utc_now():
@@ -130,15 +130,16 @@ if __name__ == "__main__":
     parser.add_argument("--strategy-channel", type=Path, required=True, help="JSONL written by the bot's --strategy-channel")
     parser.add_argument("--events", type=Path, default=None)
     parser.add_argument("--summary", type=Path, default=None)
-    parser.add_argument("--raise-menu", type=str, default="pot,all_in", help="comma list from half_pot,pot,double_pot,all_in or empty for fold/call only")
+    parser.add_argument("--raise-menu", type=str, default="pot,all_in",
+                        help="comma list from half_pot,pot,double_pot,all_in, or 'none' for fold/call only")
     parser.add_argument("--channel-timeout", type=float, default=900.0)
     args = parser.parse_args()
     if args.hands < 1:
         raise SystemExit("hands must be at least 1")
-    raise_menu = [item for item in args.raise_menu.split(",") if item]
-    for item in raise_menu:
-        if item not in ("half_pot", "pot", "double_pot", "all_in"):
-            raise SystemExit(f"unsupported raise size {item}")
+    try:
+        raise_menu = parse_raise_menu(args.raise_menu)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
 
     import settings.arguments as arguments
     from server.acpc_game import ACPCGame

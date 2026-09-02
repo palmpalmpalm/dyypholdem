@@ -37,6 +37,23 @@ FOLD_BET = constants.Actions.fold.value
 CALL_BET = constants.Actions.ccall.value
 
 
+RAISE_SIZES = ("half_pot", "pot", "double_pot", "all_in")
+
+
+def parse_raise_menu(raw: str) -> list[str]:
+    """Parse a raise-menu string; 'none' or empty means fold and call only."""
+    text = (raw or "").strip()
+    if text in ("", "none"):
+        return []
+    menu = [item.strip() for item in text.split(",") if item.strip()]
+    for item in menu:
+        if item not in RAISE_SIZES:
+            raise ValueError(f"unsupported raise size {item!r}; choose from {', '.join(RAISE_SIZES)} or none")
+    if len(set(menu)) != len(menu):
+        raise ValueError("raise menu has duplicate sizes")
+    return menu
+
+
 def action_to_bet(action: Action) -> int:
     """Map an observed ACPC action to the bet value used in the bot's strategy rows."""
     if action.action == constants.ACPCActions.fold:

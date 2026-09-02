@@ -25,6 +25,7 @@ with mock.patch.dict(sys.modules, {"game.evaluation.evaluator": evaluator_stub})
         LocalBestResponse,
         StrategyChannel,
         action_to_bet,
+        parse_raise_menu,
         summary_statistics,
     )
     from server.protocol_to_node import Action  # noqa: E402
@@ -125,6 +126,20 @@ class DecisionValueTest(unittest.TestCase):
         self.assertEqual(targets, {"half_pot": 600, "pot": 900, "double_pot": 1500, "all_in": 20000})
         self.assertEqual(LocalBestResponse.raise_targets(9000, 19000, ("pot", "all_in")), {"all_in": 20000})
         self.assertEqual(LocalBestResponse.raise_targets(20000, 20000, ("pot", "all_in")), {})
+
+
+class RaiseMenuParsingTest(unittest.TestCase):
+    def test_none_and_empty_mean_fold_call_only(self):
+        for raw in ("none", "", "  ", None):
+            self.assertEqual(parse_raise_menu(raw), [])
+
+    def test_valid_menus_and_rejections(self):
+        self.assertEqual(parse_raise_menu("pot,all_in"), ["pot", "all_in"])
+        self.assertEqual(parse_raise_menu(" half_pot , pot "), ["half_pot", "pot"])
+        for bad in ("Pot", "shove", "pot,pot"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    parse_raise_menu(bad)
 
 
 class SummaryStatisticsTest(unittest.TestCase):
