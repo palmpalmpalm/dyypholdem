@@ -51,11 +51,56 @@ def hand_statistics(winnings: list[int]) -> dict[str, float | int | None]:
     }
 
 
+def session_directories(run_dir: Path) -> list[Path]:
+    """Concurrent-session layout: run_dir/session-<i>/...; otherwise the run root."""
+    found = sorted(
+        (path for path in run_dir.glob("session-*") if path.is_dir() and path.name[8:].isdigit()),
+        key=lambda path: int(path.name[8:]),
+    )
+    return found or [run_dir]
+
+
+def merged_summary(directories: list[Path]) -> dict:
+    summaries = []
+    for directory in directories:
+        path = directory / "slumbot-summary.json"
+        if path.exists():
+            summaries.append(json.loads(path.read_text(encoding="utf-8")))
+    if not summaries:
+        return {}
+    if len(summaries) == 1:
+        return summaries[0]
+    statuses = [str(item.get("status")) for item in summaries]
+    if any(status == "failed" for status in statuses):
+        status = "failed"
+    elif all(status == "complete" for status in statuses) and len(summaries) == len(directories):
+        status = "complete"
+    else:
+        status = "running"
+    actions: dict[str, int] = {}
+    for item in summaries:
+        for key, value in (item.get("action_counts") or {}).items():
+            actions[key] = actions.get(key, 0) + int(value)
+    return {
+        "status": status,
+        "sessions": len(summaries),
+        "expected_hands": sum(int(item.get("expected_hands") or 0) for item in summaries),
+        "hand_errors": sum(int(item.get("hand_errors") or 0) for item in summaries),
+        "request_retries": sum(int(item.get("request_retries") or 0) for item in summaries),
+        "bet_size_corrections": sum(int(item.get("bet_size_corrections") or 0) for item in summaries),
+        "action_counts": dict(sorted(actions.items())),
+    }
+
+
 def build_report(run_dir: Path) -> dict:
-    events = load_jsonl(run_dir / "slumbot-events.jsonl")
-    decisions = [row for row in load_jsonl(run_dir / "decisions.jsonl") if row.get("event") == "decision"]
-    summary_path = run_dir / "slumbot-summary.json"
-    summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+    directories = session_directories(run_dir)
+    events = []
+    decisions = []
+    for directory in directories:
+        events.extend(load_jsonl(directory / "slumbot-events.jsonl"))
+        decisions.extend(row for row in load_jsonl(directory / "decisions.jsonl") if row.get("event") == "decision")
+    events.sort(key=lambda row: str(row.get("timestamp", "")))
+    summary = merged_summary(directories)
     results = [row for row in events if row.get("event") == "hand_result"]
     started = [row for row in events if row.get("event") == "hand_started"]
     winnings = [int(row["winnings"]) for row in results]
@@ -88,6 +133,7 @@ def build_report(run_dir: Path) -> dict:
 
     return {
         "run_dir": str(run_dir),
+        "sessions": len(directories),
         "status": summary.get("status"),
         "expected_hands": summary.get("expected_hands"),
         "hand_errors": summary.get("hand_errors"),
@@ -120,7 +166,7 @@ def render_markdown(report: dict) -> str:
         "",
         "| Metric | Value |",
         "|---|---:|",
-        f"| Status | {report['status']} |",
+        f"| Status | {report['status']} ({fmt(report.get('sessions', 1))} session(s)) |",
         f"| Hands completed / requested | {fmt(stats['hands'])} / {fmt(report['expected_hands'])} |",
         f"| Bot decisions (per hand) | {fmt(report['decisions'])} ({fmt(report['decisions_per_hand'])}) |",
         f"| Net chips | {fmt(stats['chips'])} |",

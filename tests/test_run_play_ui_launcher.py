@@ -104,9 +104,27 @@ class RunPlayUiLauncherTests(unittest.TestCase):
             env=env,
         )
 
-        self.assertIn("opponent: slumbot (1000 hands, bot seed 20260902", result.stdout)
+        self.assertIn("opponent: slumbot (1000 hands over 1 concurrent session(s), bot seed 20260902", result.stdout)
         self.assertIn("public service: none; the bot connects out to https://slumbot.com/api", result.stdout)
         self.assertIn("hard guard: 19800 seconds", result.stdout)
+
+    def test_slumbot_sessions_must_divide_hands_and_only_apply_to_slumbot(self):
+        cases = (
+            ({"DYYPHOLDEM_UI_OPPONENT": "slumbot", "DYYPHOLDEM_UI_HANDS": "5000", "DYYPHOLDEM_UI_SESSIONS": "3"}, "divide evenly"),
+            ({"DYYPHOLDEM_UI_OPPONENT": "random", "DYYPHOLDEM_UI_HANDS": "100", "DYYPHOLDEM_UI_SESSIONS": "2"}, "applies only to the slumbot"),
+            ({"DYYPHOLDEM_UI_OPPONENT": "slumbot", "DYYPHOLDEM_UI_HANDS": "20016", "DYYPHOLDEM_UI_SESSIONS": "16"}, "1 through 20000"),
+        )
+        for overrides, message in cases:
+            with self.subTest(overrides=overrides):
+                env = os.environ.copy()
+                env.update(overrides)
+                result = subprocess.run([str(LAUNCHER), "dry-run"], check=False, capture_output=True, text=True, env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+        env = os.environ.copy()
+        env.update({"DYYPHOLDEM_UI_OPPONENT": "slumbot", "DYYPHOLDEM_UI_HANDS": "5000", "DYYPHOLDEM_UI_SESSIONS": "4", "DYYPHOLDEM_UI_GUARD_SECONDS": "21600"})
+        result = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True, env=env)
+        self.assertIn("5000 hands over 4 concurrent session(s)", result.stdout)
 
     def test_guard_above_six_hours_or_unknown_opponent_is_rejected(self):
         for overrides, message in (
@@ -149,6 +167,8 @@ class RunPlayUiLauncherTests(unittest.TestCase):
                 "scripts/solver_regression.py",
                 "scripts/start_slumbot_remote.sh",
                 "scripts/validate_slumbot_benchmark.py",
+                "scripts/slumbot_session_status.py",
+                "scripts/slumbot_run_report.py",
                 "src/player/dyypholdem_slumbot_player.py",
                 "src/player/slumbot_match.py",
                 "src/server/slumbot_game.py",

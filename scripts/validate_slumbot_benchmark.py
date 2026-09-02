@@ -62,15 +62,48 @@ def validate(run_dir: Path, expected_hands: int) -> dict[str, object]:
     }
 
 
+def validate_sessions(run_dir: Path, expected_hands: int, sessions: int) -> dict[str, object]:
+    """Validate ``sessions`` concurrent sessions under ``run_dir/session-<i>``."""
+    if sessions < 1:
+        raise ValueError("sessions must be at least 1")
+    if expected_hands % sessions != 0:
+        raise ValueError(f"{expected_hands} hands do not divide evenly across {sessions} sessions")
+    per_session = expected_hands // sessions
+    results = []
+    for index in range(sessions):
+        session_dir = run_dir / f"session-{index}"
+        try:
+            results.append(validate(session_dir, per_session))
+        except ValueError as error:
+            raise ValueError(f"session {index}: {error}") from error
+    winnings = sum(int(result["bot_winnings"]) for result in results)
+    return {
+        "valid": True,
+        "sessions": sessions,
+        "hands_completed": expected_hands,
+        "decision_count": sum(int(result["decision_count"]) for result in results),
+        "bot_winnings": winnings,
+        "mbb_per_hand": winnings / expected_hands * 10.0,
+        "hand_errors": sum(int(result["hand_errors"]) for result in results),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--hands", type=int, required=True)
+    parser.add_argument("--hands", type=int, required=True, help="total hands across all sessions")
+    parser.add_argument("--sessions", type=int, default=0,
+                        help="validate session-<i> subdirectories (0 = legacy single run at the root)")
     args = parser.parse_args()
-    if not 1 <= args.hands <= 1000:
-        raise SystemExit("hands must be between 1 and 1000")
+    if not 1 <= args.hands <= 20000:
+        raise SystemExit("hands must be between 1 and 20000")
+    if not 0 <= args.sessions <= 16:
+        raise SystemExit("sessions must be between 0 and 16")
     try:
-        result = validate(args.run_dir, args.hands)
+        if args.sessions:
+            result = validate_sessions(args.run_dir, args.hands, args.sessions)
+        else:
+            result = validate(args.run_dir, args.hands)
     except ValueError as error:
         raise SystemExit(str(error)) from error
     print(json.dumps(result, sort_keys=True))
