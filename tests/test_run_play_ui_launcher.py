@@ -132,12 +132,14 @@ class RunPlayUiLauncherTests(unittest.TestCase):
         result = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True, env=env)
         self.assertIn("CUDA Graph gate: 1", result.stdout)
         self.assertIn("opponent bet sizing: 0.5,1,2", result.stdout)
+        self.assertIn("NVIDIA MPS for concurrent sessions: 0", result.stdout)
         default = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True)
         self.assertIn("CUDA Graph gate: 0", default.stdout)
         self.assertIn("opponent bet sizing: default pot-only tree", default.stdout)
         for overrides, message in (
             ({"DYYPHOLDEM_UI_GRAPH_GATE": "yes"}, "must be 0 or 1"),
             ({"DYYPHOLDEM_OPPONENT_BET_SIZING": "half;pot"}, "comma-separated list of pot fractions"),
+            ({"DYYPHOLDEM_UI_MPS": "on"}, "DYYPHOLDEM_UI_MPS must be 0 or 1"),
         ):
             with self.subTest(overrides=overrides):
                 env = os.environ.copy()

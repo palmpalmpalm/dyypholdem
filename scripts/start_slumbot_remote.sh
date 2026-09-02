@@ -37,6 +37,24 @@ for pid_file in "$RUN_DIR"/*.pid "$RUN_DIR"/session-*/bot.pid; do
   fi
 done
 
+MPS_STATUS="disabled"
+if [ "${DYYPHOLDEM_UI_MPS:-0}" = 1 ]; then
+  # NVIDIA MPS lets kernels from independent bot processes execute concurrently
+  # instead of time-slicing the GPU between CUDA contexts.
+  if command -v nvidia-cuda-mps-control >/dev/null 2>&1; then
+    export CUDA_MPS_PIPE_DIRECTORY="${CUDA_MPS_PIPE_DIRECTORY:-/tmp/nvidia-mps}"
+    export CUDA_MPS_LOG_DIRECTORY="${CUDA_MPS_LOG_DIRECTORY:-/tmp/nvidia-log}"
+    mkdir -p "$CUDA_MPS_PIPE_DIRECTORY" "$CUDA_MPS_LOG_DIRECTORY"
+    if nvidia-cuda-mps-control -d >"$RUN_DIR/mps.log" 2>&1; then
+      MPS_STATUS="started"
+    else
+      MPS_STATUS="start-failed"
+    fi
+  else
+    MPS_STATUS="unavailable"
+  fi
+fi
+
 cd "$PROJECT_DIR/src"
 for index in $(seq 0 $(( SESSIONS - 1 ))); do
   SESSION_DIR="$RUN_DIR/session-$index"
@@ -61,8 +79,9 @@ cat > "$RUN_DIR/environment.json" <<EOF2
   "sessions": $SESSIONS,
   "seed": $SEED,
   "opponent": "slumbot",
-  "opponent_host": "slumbot.com"
+  "opponent_host": "slumbot.com",
+  "mps": "$MPS_STATUS"
 }
 EOF2
 
-echo "SLUMBOT_STARTED run=$RUN_NAME sessions=$SESSIONS hands_per_session=$HANDS_PER_SESSION"
+echo "SLUMBOT_STARTED run=$RUN_NAME sessions=$SESSIONS hands_per_session=$HANDS_PER_SESSION mps=$MPS_STATUS"

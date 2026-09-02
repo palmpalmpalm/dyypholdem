@@ -34,6 +34,7 @@ GPU_REGRESSION="${DYYPHOLDEM_UI_GPU_REGRESSION:-1}"
 GRAPH_GATE="${DYYPHOLDEM_UI_GRAPH_GATE:-0}"
 OPPONENT_BET_SIZING="${DYYPHOLDEM_OPPONENT_BET_SIZING:-}"
 MATCH_CUDA_GRAPHS="off"
+MPS="${DYYPHOLDEM_UI_MPS:-0}"
 MODEL_ROOT="${DYYPHOLDEM_COMPACT_MODEL_PATH:-$PROJECT_DIR/runs/model-recovery/compact}"
 HTTP_PORT=8000
 FINALIZE_MARGIN_SECONDS=90
@@ -153,6 +154,10 @@ validate_config() {
   }
   [ "$GRAPH_GATE" = 0 ] || [ "$GRAPH_GATE" = 1 ] || {
     echo "DYYPHOLDEM_UI_GRAPH_GATE must be 0 or 1" >&2
+    return 1
+  }
+  [ "$MPS" = 0 ] || [ "$MPS" = 1 ] || {
+    echo "DYYPHOLDEM_UI_MPS must be 0 or 1" >&2
     return 1
   }
   case "$OPPONENT_BET_SIZING" in
@@ -701,6 +706,7 @@ if [ "$COMMAND" = "dry-run" ]; then
     "  GPU regression: $GPU_REGRESSION (strict preflop root/chance tensors before UI start)" \
     "  CUDA Graph gate: $GRAPH_GATE (bitwise off-versus-required capture on all public nodes; match uses auto mode only if it passes)" \
     "  opponent bet sizing: ${OPPONENT_BET_SIZING:-default pot-only tree}" \
+    "  NVIDIA MPS for concurrent sessions: $MPS" \
     "  controller: detached locally; start waits up to $CONTROLLER_READY_WAIT_SECONDS seconds for PLAY_UI_READY" \
     "  hard guard: $GUARD_SECONDS seconds; authenticated remote retry-delete plus independent local stop/delete watchdog" \
     "  spend cap: ${MAX_TOTAL_COST_USD:-not configured} USD projected maximum compute cost" \
@@ -952,7 +958,7 @@ fi
 
 if [ "$SLUMBOT_MODE" = 1 ]; then
   echo "starting real continual resolver against Slumbot"
-  "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING'; cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED' '$SESSIONS'"
+  "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_UI_MPS='$MPS'; cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED' '$SESSIONS'"
 else
   echo "starting dealer, authenticated UI, and real continual resolver"
   "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD); cd /root/dyypholdem && ./scripts/start_play_ui_remote.sh '$RUN_NAME' '$HANDS' '$SEED' /root/dyypholdem/session-token '$OPPONENT' '$OPPONENT_SEED'"
