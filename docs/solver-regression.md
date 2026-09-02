@@ -271,6 +271,37 @@ The live launcher can validate all of this on the pod before a match:
 `DYYPHOLDEM_CUDA_GRAPHS=auto`. Any failure leaves the match in eager mode or
 aborts the launch.
 
+### 2026-09-02 RTX 4090 Gate Result
+
+Run `dyypholdem-slumbot-20260902T092737Z` executed the gate on a Secure RTX
+4090 (PyTorch 2.8, CUDA 12.8) with the opponent bet menu `0.5,1,2` enabled,
+1,000 iterations with 500 skipped, one warmup and three measured repeats per
+node, before starting its match. Every required-mode solve replayed graphs
+and every raw float32 tensor hash matched the eager capture:
+
+| Node | Eager solve | Graph replay | Speedup | Bitwise |
+|---|---:|---:|---:|---|
+| preflop-root | 4.908 s | 0.434 s | 11.8x | identical |
+| flop-3cAdKc | 4.561 s | 1.314 s | 3.6x | identical |
+| turn-3c5h4h3h | 4.567 s | 0.923 s | 5.2x | identical |
+| river-7d7c8s5sQd | 1.928 s | 0.251 s | 7.8x | identical |
+
+The chance-action probes on the preflop node matched as well. The first
+attempt of the same gate had already produced the same per-street CFR timings
+and then failed only on a stale harness check that still expected graphs on
+river solves alone; that check now accepts any street on a CUDA device.
+
+Two remarks on reading the numbers. The eager side already carries the wider
+opponent tree, so it is 10% to 15% slower than the default-tree solves in the
+earlier live runs, which makes the replay times the more useful absolute
+figures. And the flop replay is the slowest of the four because its captured
+iteration includes the turn network forward pass and the bucketing matrix
+multiplies, which are real GPU work rather than launch overhead; the next
+speed lever there is kernel fusion inside the value box, not graphs.
+
+Graphs remain opt-in in `arguments.py`. The live launcher promotes a match to
+`DYYPHOLDEM_CUDA_GRAPHS=auto` only after this gate passes on the same pod.
+
 ## Opponent Bet Menu
 
 `DYYPHOLDEM_OPPONENT_BET_SIZING="0.5,1,2"` gives the opponent (the player who
