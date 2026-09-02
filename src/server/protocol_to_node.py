@@ -40,13 +40,14 @@ class ProcessedState(object):
 
     def __repr__(self):
         line_1 = f"{arguments.street_names[self.current_street]} - Position: {self.position} / {repr(self.player)} - Pocket cards: {self.my_hand_string} - Board: {self.board} - "
-        if self.actions[self.current_street-1]:
-            last_action = self.actions[self.current_street-1][len(self.actions[self.current_street-1])-1]
-        else:
-            if self.current_street == 1:
-                last_action = Action()
-            else:
-                last_action = self.actions[self.current_street-2][len(self.actions[self.current_street-2]) - 1]
+        # A called all-in before the river makes the dealer run out later
+        # streets with no actions at all, so walk back to the last street that
+        # has one instead of assuming the previous street does.
+        last_action = Action()
+        for street_actions in reversed(self.actions[:self.current_street]):
+            if street_actions:
+                last_action = street_actions[-1]
+                break
         line_2 = f"Last Action: {last_action.__repr__()} - My Bet: {self.bet2 if self.position == 0 else self.bet1} - Opp Bet: {self.bet1 if self.position == 0 else self.bet2}"
         return line_1 + line_2
 

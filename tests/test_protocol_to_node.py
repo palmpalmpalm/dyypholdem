@@ -135,5 +135,20 @@ class ProtocolToNodeTest(unittest.TestCase):
         self.assertEqual(state.acting_player, constants.Players.Chance)
 
 
+
+
+class RunOutStateReprTest(unittest.TestCase):
+    def test_flop_all_in_run_out_state_is_printable_and_terminal(self):
+        with mock.patch.object(arguments, "Tensor", torch.FloatTensor):
+            state = protocol_to_node.parse_state(
+                "MATCHSTATE:1:35:cr300c/r20000c//:KcKs|Jc2s/TsJs3d/8h/Ah"
+            )
+        text = repr(state)
+        self.assertIn("River", text)
+        self.assertEqual(state.acting_player, constants.Players.Chance)
+        self.assertEqual(state.bet1, 20000)
+        self.assertEqual(state.bet2, 20000)
+
+
 if __name__ == "__main__":
     unittest.main()
