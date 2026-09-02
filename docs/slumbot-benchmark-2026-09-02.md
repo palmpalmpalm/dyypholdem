@@ -84,6 +84,29 @@ python3 player/dyypholdem_slumbot_player.py 2 --seed 20260902 \
 `DYYPHOLDEM_DEVICE` defaults to `cuda`; the only other accepted value is
 `cpu`.
 
+## Concurrent sessions
+
+`DYYPHOLDEM_UI_SESSIONS=N` starts N independent bot processes on one pod, each
+with its own Slumbot token, seed (`SEED + i`), and `session-<i>/` artifacts;
+the total hand count must divide evenly. The controller aggregates the
+per-session summaries for readiness, progress, failure detection, and final
+validation, and `scripts/slumbot_run_report.py` merges them.
+
+The first four-session run measured the scaling: each session slowed from
+11.9 s/hand solo to about 30 s/hand, so the aggregate was 8.0 s/hand, only
+1.5x the solo throughput, with the RTX 4090 reporting 99% utilization. Four
+CUDA contexts time-slice the GPU rather than overlap their small kernels.
+`DYYPHOLDEM_UI_MPS=1` therefore starts the NVIDIA MPS control daemon on the pod
+before the sessions so kernels from different processes can run concurrently;
+`environment.json` records whether it started. Combined with CUDA Graph replay
+(`DYYPHOLDEM_UI_GRAPH_GATE=1`), which removes most of the per-iteration launch
+overhead that the GPU was spending its time on, this is the path to cheaper
+Slumbot hands.
+
+Sizing rule of thumb from the same run: at 8 s/hand aggregate a six-hour guard
+covers about 2,500 hands after setup, so request no more than that per launch
+until the MPS and graph numbers are in.
+
 ## Reading the result
 
 Slumbot reports winnings from the client's perspective in chips. With a
