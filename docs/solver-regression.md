@@ -229,13 +229,13 @@ eager graph warmups mutate live solver tensors, any capture error aborts the
 solve without eager fallback; continuing eagerly could mix partially mutated
 state into the result.
 
-This preflop memory candidate and CUDA Graph execution path have not yet been
-validated by a fresh real-GPU A/B. The 2026-08-27 RTX 4090 results below predate
-these changes and do not validate them. Production therefore remains
-unchanged: CUDA Graphs stay `off` by default, and the live UI must not enable
-`DYYPHOLDEM_CUDA_GRAPHS` until the strict hardware gates above pass and the
-project explicitly promotes the mode. Keep graph qualification single-flight;
-concurrent process-wide CUDA capture has not been validated.
+Superseded on 2026-09-02. The condition stated here, that the project would
+promote the mode once the strict hardware gates passed, has been met: four
+bitwise RTX 4090 gates across every public node, and a 2,400-hand match in
+which 5,425 of 6,625 decisions replayed graphs with no error. Graph replay is
+now the default (`auto`); see the promotion note below. Concurrent capture is
+no longer unvalidated either, since that match ran four sessions sharing one
+GPU under MPS.
 
 ## CUDA Graphs On Every Street
 
@@ -299,8 +299,29 @@ iteration includes the turn network forward pass and the bucketing matrix
 multiplies, which are real GPU work rather than launch overhead; the next
 speed lever there is kernel fusion inside the value box, not graphs.
 
-Graphs remain opt-in in `arguments.py`. The live launcher promotes a match to
-`DYYPHOLDEM_CUDA_GRAPHS=auto` only after this gate passes on the same pod.
+### Promotion to default, 2026-09-02
+
+`arguments.py` now defaults `cuda_graph_mode` to `auto` and `cfr_iters` to
+2,000 with 1,000 skipped. The two changes belong together: doubling the
+iterations is what the convergence probe below shows is worth having, and
+graph replay is what pays for it. A graphed 2,000-iteration solve is faster
+than the eager 1,000-iteration solve it replaces on every node:
+
+| Node | Eager 1,000 (shipped before) | Graphed 2,000 (shipped now) |
+|---|---:|---:|
+| preflop-root | 5.112 s | 0.828 s |
+| flop-3cAdKc | 4.685 s | 2.577 s |
+| turn-3c5h4h3h | 4.767 s | 1.793 s |
+| river-7d7c8s5sQd | 1.945 s | 0.487 s |
+
+So the shipped bot now plays measurably closer to a converged strategy and
+still answers faster than it did this morning. `auto` falls back before any
+solver state is mutated when a solve is ineligible, so a CPU host or a build
+without the graph API runs the eager loop unchanged; `DYYPHOLDEM_CUDA_GRAPHS=off`
+restores the old path, and `DYYPHOLDEM_CFR_ITERS=1000` the old iteration count.
+The regression harness keeps its own `off` default so baselines stay eager
+unless a capture asks otherwise, and `DYYPHOLDEM_UI_GRAPH_GATE=1` still proves
+the equivalence bitwise on the pod before a paid match.
 
 ## Opponent Bet Menu
 

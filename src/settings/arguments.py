@@ -52,7 +52,7 @@ def _positive_int_env(name, default):
     return value
 
 
-cfr_iters = _positive_int_env("DYYPHOLDEM_CFR_ITERS", 1000)
+cfr_iters = _positive_int_env("DYYPHOLDEM_CFR_ITERS", 2000)
 # the number of preliminary CFR iterations which DyypHoldem doesn't factor into the average strategy (included in cfr_iters)
 cfr_skip_iters = _positive_int_env("DYYPHOLDEM_CFR_SKIP_ITERS", cfr_iters // 2)
 if cfr_skip_iters >= cfr_iters:
@@ -89,11 +89,13 @@ runtime_device = os.environ.get("DYYPHOLDEM_DEVICE", "cuda").strip().lower()
 if runtime_device not in ("cuda", "cpu"):
     raise RuntimeError("DYYPHOLDEM_DEVICE must be cuda or cpu")
 use_gpu = runtime_device == "cuda"
-# CUDA Graph replay is experimental and remains opt-in until strict GPU A/B
-# validation has passed. "auto" falls back before computation when a solve is
-# ineligible; "required" fails instead of silently using the eager loop.
+# CUDA Graph replay is the default after four bitwise RTX 4090 gates on every
+# public node (2026-09-02) and 5,425 graphed decisions across four concurrent
+# sessions with no error. "auto" falls back before computation when a solve is
+# ineligible, so a CPU host or an unsupported build runs the eager loop;
+# "required" fails instead of silently using it, and "off" restores it.
 cuda_graph_mode = os.environ.get(
-    "DYYPHOLDEM_CUDA_GRAPHS", "off"
+    "DYYPHOLDEM_CUDA_GRAPHS", "auto"
 ).strip().lower()
 if cuda_graph_mode not in ("off", "auto", "required"):
     raise RuntimeError(

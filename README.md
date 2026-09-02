@@ -199,10 +199,14 @@ Optional flags record the same telemetry as the ACPC player: `--seed`,
 Secure RTX 4090 with a spend cap; see `docs/slumbot-benchmark-2026-09-02.md`.
 Set `DYYPHOLDEM_DEVICE=cpu` to run the solver on CPU for local smoke tests.
 
-Solver experiment knobs, all opt-in and off by default:
+Solver knobs (the first two are shipped defaults, the rest opt-in):
 
-- `DYYPHOLDEM_CUDA_GRAPHS=auto|required` replays each CFR iteration as a CUDA
-  Graph on every street once the on-pod gate has passed (`docs/solver-regression.md`).
+- `DYYPHOLDEM_CUDA_GRAPHS=off` restores the eager CFR loop. Graph replay on
+  every street is the default since 2026-09-02, after four bitwise RTX 4090
+  gates; `required` refuses to fall back (`docs/solver-regression.md`).
+- `DYYPHOLDEM_CFR_ITERS=1000` restores the previous iteration count. The
+  default is 2,000 with 1,000 skipped, which sits about three times closer to a
+  4,000-iteration solve while running faster than the eager 1,000 it replaced.
 - `DYYPHOLDEM_OPPONENT_BET_SIZING=0.5,1,2` widens the opponent's first-bet menu
   in the lookahead while the bot's own bets stay pot-sized.
 - `DYYPHOLDEM_CFR_VARIANT=dcfr` discounts accumulated regrets by

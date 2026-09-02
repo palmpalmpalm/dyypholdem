@@ -677,6 +677,34 @@ class SolverRegressionTest(unittest.TestCase):
 
 
 
+class RuntimeDefaultsTest(unittest.TestCase):
+    """Pin the shipped runtime defaults so a change to them is deliberate."""
+
+    def read(self, **env):
+        import subprocess
+
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import settings.arguments as a; print(a.cfr_iters, a.cfr_skip_iters, a.cuda_graph_mode)",
+            ],
+            cwd=str(PROJECT_DIR / "src"),
+            env={**os.environ, "DYYPHOLDEM_DEVICE": "cpu", **env},
+            capture_output=True,
+            text=True,
+        )
+
+    def test_graph_replay_and_two_thousand_iterations_are_the_default(self):
+        # Promoted 2026-09-02 after four bitwise RTX 4090 gates; a graphed
+        # 2,000-iteration solve is faster than the eager 1,000 it replaced.
+        self.assertIn("2000 1000 auto", self.read().stdout)
+
+    def test_defaults_remain_overridable(self):
+        self.assertIn("2000 1000 off", self.read(DYYPHOLDEM_CUDA_GRAPHS="off").stdout)
+        self.assertIn("1000 500 auto", self.read(DYYPHOLDEM_CFR_ITERS="1000").stdout)
+
+
 class CfrIterationEnvironmentTest(unittest.TestCase):
     """arguments.py reads the iteration counts from the environment, fail-closed."""
 
@@ -696,8 +724,8 @@ class CfrIterationEnvironmentTest(unittest.TestCase):
         return result
 
     def test_defaults_and_overrides(self):
-        self.assertIn("1000 500", self.read().stdout)
-        self.assertIn("2000 1000", self.read(DYYPHOLDEM_CFR_ITERS="2000").stdout)
+        self.assertIn("2000 1000", self.read().stdout)
+        self.assertIn("1000 500", self.read(DYYPHOLDEM_CFR_ITERS="1000").stdout)
         self.assertIn(
             "2000 400",
             self.read(DYYPHOLDEM_CFR_ITERS="2000", DYYPHOLDEM_CFR_SKIP_ITERS="400").stdout,
@@ -707,7 +735,8 @@ class CfrIterationEnvironmentTest(unittest.TestCase):
         for env, message in (
             ({"DYYPHOLDEM_CFR_ITERS": "many"}, "must be an integer"),
             ({"DYYPHOLDEM_CFR_ITERS": "0"}, "must be at least 1"),
-            ({"DYYPHOLDEM_CFR_SKIP_ITERS": "1000"}, "must be smaller than"),
+            # Skipping every iteration leaves nothing to average.
+            ({"DYYPHOLDEM_CFR_SKIP_ITERS": "2000"}, "must be smaller than"),
         ):
             with self.subTest(env=env):
                 result = self.read(**env)
