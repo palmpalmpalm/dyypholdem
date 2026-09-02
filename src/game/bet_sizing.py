@@ -12,8 +12,11 @@ class BetSizing(object):
     # --- Constructor
     # -- @param pot_fractions a list of fractions of the pot which are allowed
     # -- as bets, sorted in ascending order
-    def __init__(self, pot_fractions):
+    def __init__(self, pot_fractions, opponent_pot_fractions=None):
         self.pot_fractions = pot_fractions or [1]
+        # Optional separate menu for the opponent of the player acting at the
+        # tree root; None means both players share ``pot_fractions``.
+        self.opponent_pot_fractions = opponent_pot_fractions or None
 
     # --- Gives the bets which are legal at a game state.
     # -- @param node a representation of the current game state, with fields:
@@ -23,7 +26,7 @@ class BetSizing(object):
     # -- * `current_player`: the currently acting player
     # -- @return an Nx2 tensor where N is the number of new possible game states,
     # -- containing N sets of new commitment levels for each player
-    def get_possible_bets(self, node):
+    def get_possible_bets(self, node, opponent_menu=False):
         current_player = node.current_player.value
         assert current_player == 0 or current_player == 1, 'Wrong player for bet size computation'
         opponent = 1 - node.current_player.value
@@ -44,13 +47,16 @@ class BetSizing(object):
             return out
         else:
             # iterate through all bets and check if they are possible
+            menu = self.pot_fractions
+            if opponent_menu and self.opponent_pot_fractions is not None:
+                menu = self.opponent_pot_fractions
             fractions = []
             if node.num_bets == 0:
-                fractions = self.pot_fractions[0]
+                fractions = menu[0]
             elif node.num_bets == 1:
-                fractions = self.pot_fractions[1]
+                fractions = menu[1]
             else:
-                fractions = self.pot_fractions[2]
+                fractions = menu[2]
 
             max_possible_bets_count = len(fractions) + 1    # we can always go allin
             out = arguments.Tensor(max_possible_bets_count, 2).fill_(opponent_bet)

@@ -36,6 +36,11 @@ class NextRoundValuePre(object):
     next_round_values_on_board: torch.Tensor
     values_per_board: torch.Tensor
 
+    supports_explicit_iteration = True
+    next_round_inputs = None
+    range_normalization_memory = None
+    counterfactual_value_memory = None
+
     def __init__(self, nn, aux_nn, board):
         self.nn = nn
         self.aux_nn = aux_nn
@@ -103,16 +108,22 @@ class NextRoundValuePre(object):
     # -- betting round ends
     def start_computation(self, pot_sizes, batch_size):
         self.iter = 0
+        self.next_round_inputs = None
+        self.range_normalization_memory = None
+        self.counterfactual_value_memory = None
         self.pot_sizes = pot_sizes.view(-1, 1).clone()
         self.pot_sizes = self.pot_sizes.expand(self.pot_sizes.size(0), batch_size).clone()
         self.pot_sizes = self.pot_sizes.view(-1, 1)
         self.batch_size = self.pot_sizes.size(0)
 
-    def get_value_aux(self, ranges, values, next_board_idx):
+    def get_value_aux(self, ranges, values, next_board_idx, iteration=None):
         assert ranges.size(0) == self.batch_size, "ranges size does not match batch size"
 
-        self.iter = self.iter + 1
-        if self.iter == 1:
+        if iteration is None:
+            self.iter = self.iter + 1
+        else:
+            self.iter = int(iteration)
+        if self.next_round_inputs is None:
             # initializing data structures
             self.next_round_inputs = arguments.Tensor(self.batch_size, (self.bucket_count_aux * constants.players_count + 1)).zero_()
             self.next_round_values = arguments.Tensor(self.batch_size, constants.players_count, self.bucket_count_aux).zero_()
@@ -133,7 +144,7 @@ class NextRoundValuePre(object):
         # we need to find if we need remember something in this iteration
         use_memory = self.iter > arguments.cfr_skip_iters and next_board_idx is not None
         # logger.debug(f"Using memory={use_memory}")
-        if use_memory and self.iter == arguments.cfr_skip_iters + 1:
+        if use_memory and self.range_normalization_memory is None:
             # first iter that we need to remember something - we need to init data structures
             self.bucket_range_on_board = arguments.Tensor(self.batch_size * constants.players_count, self.bucket_count)
             self.range_normalization_on_board = arguments.Tensor(
@@ -176,7 +187,7 @@ class NextRoundValuePre(object):
             self.range_normalization_memory.add_(self.value_normalization_on_board.view(self.range_normalization_memory.shape))
 
         # eliminating division by zero
-        self.range_normalization[torch.eq(self.range_normalization, 0)] = 1
+        self.range_normalization.masked_fill_(torch.eq(self.range_normalization, 0), 1)
         self.next_round_serialized_range.div_(self.range_normalization.view(-1, 1).expand_as(self.next_round_serialized_range))
         for player in range(constants.players_count):
             player_range_index = [player * self.bucket_count_aux, (player + 1) * self.bucket_count_aux]
@@ -191,7 +202,7 @@ class NextRoundValuePre(object):
 
         if use_memory:
             # eliminating division by zero
-            self.range_normalization_on_board[torch.eq(self.range_normalization_on_board, 0)] = 1
+            self.range_normalization_on_board.masked_fill_(torch.eq(self.range_normalization_on_board, 0), 1)
             self.next_round_serialized_range_on_board.div_(self.range_normalization_on_board.view(-1, 1).expand_as(self.next_round_serialized_range_on_board))
             for player in range(constants.players_count):
                 player_range_index = [player * self.bucket_count, (player + 1) * self.bucket_count]
@@ -273,7 +284,7 @@ class NextRoundValuePre(object):
             self.value_normalization[:, player, :].copy_(rn_view[:, 1 - player, :])
 
         # eliminating division by zero
-        self.range_normalization[torch.eq(self.range_normalization, 0)] = 1
+        self.range_normalization.masked_fill_(torch.eq(self.range_normalization, 0), 1)
         self.next_round_serialized_range.div_(self.range_normalization.view(-1, 1).expand_as(self.next_round_serialized_range))
         for player in range(constants.players_count):
             player_range_index = [player * self.bucket_count, (player + 1) * self.bucket_count]
@@ -309,7 +320,7 @@ class NextRoundValuePre(object):
         batch_size = values.size(0)
         assert batch_size == self.batch_size
 
-        self.range_normalization_memory[torch.eq(self.range_normalization_memory, 0)] = 1
+        self.range_normalization_memory.masked_fill_(torch.eq(self.range_normalization_memory, 0), 1)
         serialized_memory_view = self.counterfactual_value_memory.view(-1, self.bucket_count)
         serialized_memory_view.div_(self.range_normalization_memory.expand_as(serialized_memory_view))
 
@@ -430,9 +441,7 @@ class NextRoundValuePre(object):
                 value_normalization.view(range_normalization_memory.shape)
             )
 
-            range_normalization[
-                torch.eq(range_normalization, 0)
-            ] = 1
+            range_normalization.masked_fill_(torch.eq(range_normalization, 0), 1)
             mapped_serialized_range.div_(
                 range_normalization.view(-1, 1).expand_as(
                     mapped_serialized_range
@@ -469,9 +478,7 @@ class NextRoundValuePre(object):
             )
             counterfactual_value_memory.add_(mapped_values)
 
-        range_normalization_memory[
-            torch.eq(range_normalization_memory, 0)
-        ] = 1
+        range_normalization_memory.masked_fill_(torch.eq(range_normalization_memory, 0), 1)
         counterfactual_value_memory.view(
             -1, self.bucket_count
         ).div_(

@@ -198,3 +198,13 @@ Optional flags record the same telemetry as the ACPC player: `--seed`,
 `make slumbot-benchmark` runs a guarded 1,000-hand match on a throwaway
 Secure RTX 4090 with a spend cap; see `docs/slumbot-benchmark-2026-09-02.md`.
 Set `DYYPHOLDEM_DEVICE=cpu` to run the solver on CPU for local smoke tests.
+
+Solver experiment knobs, all opt-in and off by default:
+
+- `DYYPHOLDEM_CUDA_GRAPHS=auto|required` replays each CFR iteration as a CUDA
+  Graph on every street once the on-pod gate has passed (`docs/solver-regression.md`).
+- `DYYPHOLDEM_OPPONENT_BET_SIZING=0.5,1,2` widens the opponent's first-bet menu
+  in the lookahead while the bot's own bets stay pot-sized.
+- `DYYPHOLDEM_CFR_VARIANT=dcfr` discounts accumulated regrets by
+  `t^1.5 / (t^1.5 + 1)` after each iteration.
+- `DYYPHOLDEM_UI_SESSIONS=4` runs four independent Slumbot sessions on one pod.

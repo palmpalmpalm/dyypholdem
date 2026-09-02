@@ -237,6 +237,60 @@ unchanged: CUDA Graphs stay `off` by default, and the live UI must not enable
 project explicitly promotes the mode. Keep graph qualification single-flight;
 concurrent process-wide CUDA capture has not been validated.
 
+## CUDA Graphs On Every Street
+
+Date: 2026-09-02 (Asia/Bangkok)
+
+Graph eligibility no longer stops at the river. The flop, turn, and preflop
+loops call the value network inside the captured iteration, which required
+three changes that are bit-identical in eager mode:
+
+- `NextRoundValue.get_value` and `NextRoundValuePre.get_value_aux` accept an
+  explicit `iteration`. The lookahead passes the phase representative (1 for
+  burn-in, `skip + 1` for averaging), so three eager warmups and the recorded
+  iteration all see the same phase and the box's own counter never drifts.
+  Their per-solve buffers are allocated on first use and reset in
+  `start_computation`, so repeating the representative iteration accumulates
+  memory instead of re-allocating it.
+- The `range_normalization[torch.eq(x, 0)] = 1` zero guards became
+  `masked_fill_`. Boolean-mask assignment performs a host synchronization
+  (`nonzero`) that aborts a CUDA Graph capture.
+- The preflop trajectory copy stays outside the graph. Capture records the
+  iteration with the copy disabled; every replay is followed by one eager
+  `index_select` with the true iteration number, so each averaging iteration
+  lands in its own slot exactly as in the eager loop.
+
+After the solve, `_finalize_iteration_accounting` sets the box counter to the
+full iteration count because graph replays never execute Python.
+
+The live launcher can validate all of this on the pod before a match:
+`DYYPHOLDEM_UI_GRAPH_GATE=1` captures every public node with
+`--cuda-graphs off` and `--cuda-graphs required`, compares them with
+`--require-bitwise`, asserts every required-mode solve reports
+`cuda_graph_used=true`, and only then starts the bot processes with
+`DYYPHOLDEM_CUDA_GRAPHS=auto`. Any failure leaves the match in eager mode or
+aborts the launch.
+
+## Opponent Bet Menu
+
+`DYYPHOLDEM_OPPONENT_BET_SIZING="0.5,1,2"` gives the opponent (the player who
+is not acting at the lookahead root) the listed pot fractions for the first
+bet of a street; the opponent's raises and every action of the re-solving
+player keep the pot-only menu. Bet nodes now carry `num_bets`, so per-level
+menus apply to raises correctly; with the default menus this is bit-identical
+to the original tree. The lookahead builder pads nodes with fewer actions and
+pins all-in to the last slot, so mixed action counts at one depth need no
+layout change. Unset keeps the original tree for both players.
+
+## CFR Variant
+
+`DYYPHOLDEM_CFR_VARIANT=dcfr` discounts accumulated regrets after iteration
+`t` by `t^1.5 / (t^1.5 + 1)`, including the CFR-D gadget regrets, while the
+skip-based uniform averaging window stays as it is. The counter lives on the
+solver device so CUDA Graph replays advance it. The default `cfr+` runs the
+legacy loop with no extra kernels. Captures record `cfr_variant` in their
+configuration.
+
 ## Iteration Sweeps
 
 Iteration changes are rejected unless explicitly acknowledged. Capture each
