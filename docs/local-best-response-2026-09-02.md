@@ -127,6 +127,50 @@ collapses, since no hand builds a 20,000-chip pot. The 332 non-shoving hands
 above already hint at the answer, being within 50 chips of break-even. The
 next run uses `DYYPHOLDEM_LBR_RAISE_MENU=` (empty).
 
+### `dyypholdem-lbr-20260902T161854Z`: fold or call only, stopped at 206 hands
+
+Run with `DYYPHOLDEM_LBR_RAISE_MENU=none` to test the prediction that removing
+raises would collapse the variance. It did not, and the run was stopped early
+rather than pay for a foregone result.
+
+| Metric | Pot and all-in menu | Fold or call only |
+|---|---:|---:|
+| Per-hand standard deviation | 3,698 chips | 2,939 chips |
+| Projected 95% CI at 1,000 hands | ±2,292 | ±1,822 |
+| LBR fold rate | 13% | 8% |
+
+Only 1.3x lower, because the variance was never LBR's raises. Five hands of
+206 (2%) hold −31,900 chips while the other 201 total −3,200. In those five
+LBR called bets of up to 19,700 chips at a median equity of +0.315. The
+call-down value of a call is correct in isolation, but the assumption behind
+it, that the hand checks down after this decision, is exactly what an
+aggressive opponent violates: the bot keeps betting on later streets and LBR,
+folding only 8% of the time, calls all the way with a marginal holding.
+
+**Conclusion: this LBR cannot bound the bot's exploitability in either
+configuration.** With raises it shoves on thin equity; without them it is a
+calling station. Both failures come from the same root, the call-down
+assumption, which prices an action as if the hand ended there. A negative
+result from a broken exploiter says nothing about the bot.
+
+### What a working LBR needs
+
+The published method values a raise using the opponent's actual probability of
+folding at that node, then recomputes equity against the range that continues.
+Both numbers require asking the agent what it would do at a node it did not
+reach. The strategy channel cannot answer that; it only carries decisions the
+bot actually faced. The fix is an oracle process: a second continual resolver
+that LBR queries per candidate action, which costs one full resolve per
+question. With graph replay a river resolve is 0.25 s and a flop resolve
+1.3 s, so a three-action probe costs a few seconds per LBR decision. That is
+affordable now and was not before, but it is a real build rather than a
+parameter change.
+
+Until then the honest instruments are the deterministic solver-regression gate
+for solution quality, which is free and sensitive, and Slumbot for external
+strength, which needs about 100,000 hands (roughly $35 of GPU at the current
+1.7 s/hand) to resolve differences smaller than a few hundred mbb/hand.
+
 Across the earlier 48 validation hands the channel bookkeeping never waited or mismatched, the
 bot's telemetry and the LBR summary were exactly zero-sum, and LBR chose
 all-in in 36 of 104 decisions, call in 55, fold in 13. LBR was ahead by
