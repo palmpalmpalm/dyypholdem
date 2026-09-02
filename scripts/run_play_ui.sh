@@ -31,6 +31,9 @@ if [ "$OPPONENT" = "slumbot" ]; then
 fi
 SESSION_STATUS_HELPER="$PROJECT_DIR/scripts/slumbot_session_status.py"
 GPU_REGRESSION="${DYYPHOLDEM_UI_GPU_REGRESSION:-1}"
+GRAPH_GATE="${DYYPHOLDEM_UI_GRAPH_GATE:-0}"
+OPPONENT_BET_SIZING="${DYYPHOLDEM_OPPONENT_BET_SIZING:-}"
+MATCH_CUDA_GRAPHS="off"
 MODEL_ROOT="${DYYPHOLDEM_COMPACT_MODEL_PATH:-$PROJECT_DIR/runs/model-recovery/compact}"
 HTTP_PORT=8000
 FINALIZE_MARGIN_SECONDS=90
@@ -148,6 +151,14 @@ validate_config() {
     echo "DYYPHOLDEM_UI_GPU_REGRESSION must be 0 or 1" >&2
     return 1
   }
+  [ "$GRAPH_GATE" = 0 ] || [ "$GRAPH_GATE" = 1 ] || {
+    echo "DYYPHOLDEM_UI_GRAPH_GATE must be 0 or 1" >&2
+    return 1
+  }
+  case "$OPPONENT_BET_SIZING" in
+    ""|[0-9.,]*) ;;
+    *) echo "DYYPHOLDEM_OPPONENT_BET_SIZING must be a comma-separated list of pot fractions" >&2; return 1 ;;
+  esac
   [ "$CLOUD_TYPE" = "SECURE" ] || [ "$CLOUD_TYPE" = "COMMUNITY" ] || {
     echo "DYYPHOLDEM_GPU_CLOUD_TYPE must be SECURE or COMMUNITY" >&2
     return 1
@@ -688,6 +699,8 @@ if [ "$COMMAND" = "dry-run" ]; then
     "  models: four checksum-verified compact recovered networks" \
     "  telemetry: private JSONL plus safe live/final per-street reports" \
     "  GPU regression: $GPU_REGRESSION (strict preflop root/chance tensors before UI start)" \
+    "  CUDA Graph gate: $GRAPH_GATE (bitwise off-versus-required capture on all public nodes; match uses auto mode only if it passes)" \
+    "  opponent bet sizing: ${OPPONENT_BET_SIZING:-default pot-only tree}" \
     "  controller: detached locally; start waits up to $CONTROLLER_READY_WAIT_SECONDS seconds for PLAY_UI_READY" \
     "  hard guard: $GUARD_SECONDS seconds; authenticated remote retry-delete plus independent local stop/delete watchdog" \
     "  spend cap: ${MAX_TOTAL_COST_USD:-not configured} USD projected maximum compute cost" \
@@ -926,9 +939,20 @@ if [ "$GPU_REGRESSION" = 1 ]; then
   "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 -c 'import json; p=json.load(open(\"runs/play-ui/$RUN_NAME/solver-regression-cuda.json\")); s=p[\"spots\"][0]; rows=[a for b in s[\"chance_action_cfvs\"][\"boards\"] for a in b[\"actions\"]]; assert s[\"timing\"][\"max_repeat_tensor_delta\"] == 0; assert len(rows) == 6; assert all(a[\"timing\"][\"solver\"].get(\"captured_flop\") is True and a[\"timing\"][\"solver\"].get(\"replayed_flop\") is False for a in rows)'"
 fi
 
+if [ "$GRAPH_GATE" = 1 ]; then
+  echo "running fail-closed CUDA Graph gate: eager versus required replay on all public nodes"
+  for graph_mode in off required; do
+    "${SSH[@]}" dyyui "export DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING'; cd /root/dyypholdem && timeout 2400s python3 scripts/solver_regression.py capture --device cuda --cuda-graphs $graph_mode --iterations 1000 --skip-iterations 500 --warmups 1 --repeats 3 --threads 1 --output runs/play-ui/$RUN_NAME/graph-gate-$graph_mode.json > runs/play-ui/$RUN_NAME/graph-gate-$graph_mode.log 2>&1"
+  done
+  "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 scripts/solver_regression.py compare --baseline runs/play-ui/$RUN_NAME/graph-gate-off.json --candidate runs/play-ui/$RUN_NAME/graph-gate-required.json --require-bitwise --max-runtime-ratio 1.10 --output runs/play-ui/$RUN_NAME/graph-gate-comparison.json > runs/play-ui/$RUN_NAME/graph-gate-comparison.log 2>&1"
+  "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 -c 'import json; p=json.load(open(\"runs/play-ui/$RUN_NAME/graph-gate-required.json\")); spots=p[\"spots\"]; assert len(spots) >= 4, len(spots); [None for s in spots for r in s[\"timing\"][\"solver_repeats\"] if not (r.get(\"cuda_graph_used\") is True and r.get(\"cuda_graph_reason\") == \"enabled\")] if False else None; bad=[(s[\"name\"], r.get(\"cuda_graph_reason\")) for s in spots for r in s[\"timing\"].get(\"solver_repeats\", []) if r.get(\"cuda_graph_used\") is not True]; assert not bad, bad'"
+  MATCH_CUDA_GRAPHS="auto"
+  echo "CUDA Graph gate passed on every public node; the match will run with DYYPHOLDEM_CUDA_GRAPHS=auto"
+fi
+
 if [ "$SLUMBOT_MODE" = 1 ]; then
   echo "starting real continual resolver against Slumbot"
-  "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD); cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED' '$SESSIONS'"
+  "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING'; cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED' '$SESSIONS'"
 else
   echo "starting dealer, authenticated UI, and real continual resolver"
   "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD); cd /root/dyypholdem && ./scripts/start_play_ui_remote.sh '$RUN_NAME' '$HANDS' '$SEED' /root/dyypholdem/session-token '$OPPONENT' '$OPPONENT_SEED'"

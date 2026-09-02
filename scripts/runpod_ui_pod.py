@@ -108,6 +108,10 @@ def ssh_config(alias: str, ip: str, port: int) -> str:
         "  User root\n"
         "  IdentityFile ~/.ssh/id_ed25519\n"
         "  StrictHostKeyChecking accept-new\n"
+        # Detect a dead connection within about a minute instead of blocking a
+        # long remote step (asset download, regression gate) on TCP keepalive.
+        "  ServerAliveInterval 15\n"
+        "  ServerAliveCountMax 4\n"
     )
 
 

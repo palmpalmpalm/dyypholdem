@@ -126,6 +126,26 @@ class RunPlayUiLauncherTests(unittest.TestCase):
         result = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True, env=env)
         self.assertIn("5000 hands over 4 concurrent session(s)", result.stdout)
 
+    def test_graph_gate_and_bet_sizing_flags_are_reported_and_validated(self):
+        env = os.environ.copy()
+        env.update({"DYYPHOLDEM_UI_OPPONENT": "slumbot", "DYYPHOLDEM_UI_GRAPH_GATE": "1", "DYYPHOLDEM_OPPONENT_BET_SIZING": "0.5,1,2"})
+        result = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True, env=env)
+        self.assertIn("CUDA Graph gate: 1", result.stdout)
+        self.assertIn("opponent bet sizing: 0.5,1,2", result.stdout)
+        default = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True)
+        self.assertIn("CUDA Graph gate: 0", default.stdout)
+        self.assertIn("opponent bet sizing: default pot-only tree", default.stdout)
+        for overrides, message in (
+            ({"DYYPHOLDEM_UI_GRAPH_GATE": "yes"}, "must be 0 or 1"),
+            ({"DYYPHOLDEM_OPPONENT_BET_SIZING": "half;pot"}, "comma-separated list of pot fractions"),
+        ):
+            with self.subTest(overrides=overrides):
+                env = os.environ.copy()
+                env.update(overrides)
+                result = subprocess.run([str(LAUNCHER), "dry-run"], check=False, capture_output=True, text=True, env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
     def test_guard_above_six_hours_or_unknown_opponent_is_rejected(self):
         for overrides, message in (
             ({"DYYPHOLDEM_UI_GUARD_SECONDS": "21601"}, "900 through 21600"),
