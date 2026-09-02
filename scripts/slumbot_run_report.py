@@ -60,10 +60,10 @@ def session_directories(run_dir: Path) -> list[Path]:
     return found or [run_dir]
 
 
-def merged_summary(directories: list[Path]) -> dict:
+def merged_summary(directories: list[Path], summary_name: str = "slumbot-summary.json") -> dict:
     summaries = []
     for directory in directories:
-        path = directory / "slumbot-summary.json"
+        path = directory / summary_name
         if path.exists():
             summaries.append(json.loads(path.read_text(encoding="utf-8")))
     if not summaries:
@@ -92,15 +92,15 @@ def merged_summary(directories: list[Path]) -> dict:
     }
 
 
-def build_report(run_dir: Path) -> dict:
+def build_report(run_dir: Path, summary_name: str = "slumbot-summary.json", events_name: str = "slumbot-events.jsonl") -> dict:
     directories = session_directories(run_dir)
     events = []
     decisions = []
     for directory in directories:
-        events.extend(load_jsonl(directory / "slumbot-events.jsonl"))
+        events.extend(load_jsonl(directory / events_name))
         decisions.extend(row for row in load_jsonl(directory / "decisions.jsonl") if row.get("event") == "decision")
     events.sort(key=lambda row: str(row.get("timestamp", "")))
-    summary = merged_summary(directories)
+    summary = merged_summary(directories, summary_name)
     results = [row for row in events if row.get("event") == "hand_result"]
     started = [row for row in events if row.get("event") == "hand_started"]
     winnings = [int(row["winnings"]) for row in results]
@@ -193,8 +193,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--json", action="store_true", help="print the raw report as JSON")
+    parser.add_argument("--summary-name", default="slumbot-summary.json")
+    parser.add_argument("--events-name", default="slumbot-events.jsonl")
     args = parser.parse_args()
-    report = build_report(args.run_dir)
+    report = build_report(args.run_dir, args.summary_name, args.events_name)
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:

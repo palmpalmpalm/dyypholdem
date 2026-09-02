@@ -9,6 +9,25 @@ sys.path.append(os.getcwd())
 last_state = None
 last_node = None
 telemetry_writer = None
+strategy_channel = None
+
+
+def publish_strategy(state):
+    """Append the full-hand root strategy of the decision just made to the channel."""
+    resolving = continual_resolving.resolving
+    bets = [int(round(value)) for value in resolving.get_possible_actions().tolist()]
+    strategy = resolving.resolve_results.strategy.view(len(bets), -1)
+    record = {
+        "hand_number": int(state.hand_number),
+        "decision_number": int(continual_resolving.decision_id),
+        "street": int(state.current_street),
+        "board": state.board,
+        "bets": bets,
+        "chosen_bet": int(continual_resolving.last_bet),
+        "strategy": [[round(float(value), 6) for value in row] for row in strategy.tolist()],
+    }
+    strategy_channel.write(json.dumps(record, separators=(",", ":")) + "\n")
+    strategy_channel.flush()
 
 
 def run(server, port):
@@ -53,6 +72,10 @@ def run(server, port):
 
             if telemetry_writer is not None:
                 telemetry_writer.append(continual_resolving.last_decision_telemetry)
+            if strategy_channel is not None:
+                # Written before the action reaches the dealer so an opponent
+                # reading the channel always finds the strategy behind an action.
+                publish_strategy(current_state)
 
             if advised_action.action == constants.ACPCActions.ccall:
                 advised_action.raise_amount = abs(current_state.bet1 - current_state.bet2)
@@ -95,9 +118,12 @@ if __name__ == "__main__":
     parser.add_argument("--report", type=Path, default=None, help="safe live JSON timing report")
     parser.add_argument("--text-report", type=Path, default=None, help="safe live text timing report")
     parser.add_argument("--seed", type=int, default=None, help="seed Torch and Python action sampling")
+    parser.add_argument("--strategy-channel", type=Path, default=None,
+                        help="append every decision's full-hand strategy as JSONL (for local best response)")
     args = parser.parse_args()
 
     import gc
+    import json
 
     import torch
 
@@ -121,6 +147,10 @@ if __name__ == "__main__":
         random_.rng.seed(args.seed)
 
     continual_resolving = ContinualResolving()
+
+    if args.strategy_channel is not None:
+        args.strategy_channel.parent.mkdir(parents=True, exist_ok=True)
+        strategy_channel = args.strategy_channel.open("a", encoding="utf-8")
 
     if args.telemetry is not None:
         report_path = args.report or args.telemetry.with_name("timing_report.json")

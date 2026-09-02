@@ -1,4 +1,4 @@
-.PHONY: test web-install web-test web-build model-recovery-progress recover-models compact-model-progress compact-models gpu-model-validation-dry-run gpu-model-validation gpu-baseline-dry-run gpu-baseline play-ui-dry-run play-ui play-ui-status play-ui-logs play-ui-stop random-benchmark-dry-run random-benchmark solver-regression-preflight solver-regression-river solver-regression-compare slumbot-benchmark-dry-run slumbot-benchmark
+.PHONY: lbr-benchmark-dry-run lbr-benchmark test web-install web-test web-build model-recovery-progress recover-models compact-model-progress compact-models gpu-model-validation-dry-run gpu-model-validation gpu-baseline-dry-run gpu-baseline play-ui-dry-run play-ui play-ui-status play-ui-logs play-ui-stop random-benchmark-dry-run random-benchmark solver-regression-preflight solver-regression-river solver-regression-compare slumbot-benchmark-dry-run slumbot-benchmark
 
 PYTHON ?= /Users/palm/opt/miniconda3/bin/python3
 NPM ?= npm
@@ -13,6 +13,10 @@ SLUMBOT_SEED ?= 20260902
 SLUMBOT_GUARD_SECONDS ?= 21600
 SLUMBOT_MAX_TOTAL_COST_USD ?= 5.00
 SLUMBOT_SESSIONS ?= 1
+LBR_HANDS ?= 1000
+LBR_SEED ?= 20260905
+LBR_GUARD_SECONDS ?= 21600
+LBR_MAX_TOTAL_COST_USD ?= 5.00
 
 test:
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
@@ -83,6 +87,18 @@ slumbot-benchmark:
 		DYYPHOLDEM_UI_SESSIONS=$(SLUMBOT_SESSIONS) \
 		DYYPHOLDEM_UI_GUARD_SECONDS=$(SLUMBOT_GUARD_SECONDS) \
 		DYYPHOLDEM_UI_MAX_TOTAL_COST_USD=$(SLUMBOT_MAX_TOTAL_COST_USD) \
+		./scripts/run_play_ui.sh start
+
+lbr-benchmark-dry-run:
+	DYYPHOLDEM_UI_HANDS=$(LBR_HANDS) DYYPHOLDEM_UI_SEED=$(LBR_SEED) DYYPHOLDEM_UI_OPPONENT=lbr \
+		DYYPHOLDEM_UI_GUARD_SECONDS=$(LBR_GUARD_SECONDS) \
+		DYYPHOLDEM_UI_MAX_TOTAL_COST_USD=$(LBR_MAX_TOTAL_COST_USD) \
+		./scripts/run_play_ui.sh dry-run
+
+lbr-benchmark:
+	DYYPHOLDEM_UI_HANDS=$(LBR_HANDS) DYYPHOLDEM_UI_SEED=$(LBR_SEED) DYYPHOLDEM_UI_OPPONENT=lbr \
+		DYYPHOLDEM_UI_GUARD_SECONDS=$(LBR_GUARD_SECONDS) \
+		DYYPHOLDEM_UI_MAX_TOTAL_COST_USD=$(LBR_MAX_TOTAL_COST_USD) \
 		./scripts/run_play_ui.sh start
 
 solver-regression-preflight:

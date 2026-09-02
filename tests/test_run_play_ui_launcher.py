@@ -148,10 +148,26 @@ class RunPlayUiLauncherTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
 
+    def test_lbr_mode_dry_run_and_validation(self):
+        env = os.environ.copy()
+        env.update({"DYYPHOLDEM_UI_OPPONENT": "lbr", "DYYPHOLDEM_UI_HANDS": "1000", "DYYPHOLDEM_UI_SEED": "20260905"})
+        result = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True, env=env)
+        self.assertIn("opponent: lbr (local best response, call-down, raise menu pot,all_in, 1000 hands", result.stdout)
+        for overrides, message in (
+            ({"DYYPHOLDEM_UI_OPPONENT": "lbr", "DYYPHOLDEM_UI_SESSIONS": "2", "DYYPHOLDEM_UI_HANDS": "1000"}, "must be 1 for the lbr opponent"),
+            ({"DYYPHOLDEM_UI_OPPONENT": "lbr", "DYYPHOLDEM_LBR_RAISE_MENU": "Pot;All"}, "DYYPHOLDEM_LBR_RAISE_MENU"),
+        ):
+            with self.subTest(overrides=overrides):
+                env = os.environ.copy()
+                env.update(overrides)
+                result = subprocess.run([str(LAUNCHER), "dry-run"], check=False, capture_output=True, text=True, env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
     def test_guard_above_six_hours_or_unknown_opponent_is_rejected(self):
         for overrides, message in (
             ({"DYYPHOLDEM_UI_GUARD_SECONDS": "21601"}, "900 through 21600"),
-            ({"DYYPHOLDEM_UI_OPPONENT": "pluribus"}, "human, random, or slumbot"),
+            ({"DYYPHOLDEM_UI_OPPONENT": "pluribus"}, "human, random, slumbot, or lbr"),
         ):
             with self.subTest(overrides=overrides):
                 env = os.environ.copy()

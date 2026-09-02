@@ -26,9 +26,16 @@ OPPONENT="${DYYPHOLDEM_UI_OPPONENT:-human}"
 OPPONENT_SEED="${DYYPHOLDEM_UI_OPPONENT_SEED:-20260824}"
 SESSIONS="${DYYPHOLDEM_UI_SESSIONS:-1}"
 SLUMBOT_MODE=0
+LBR_MODE=0
+SUMMARY_NAME="slumbot-summary.json"
 if [ "$OPPONENT" = "slumbot" ]; then
   SLUMBOT_MODE=1
+elif [ "$OPPONENT" = "lbr" ]; then
+  LBR_MODE=1
+  SLUMBOT_MODE=1
+  SUMMARY_NAME="lbr-summary.json"
 fi
+LBR_RAISE_MENU="${DYYPHOLDEM_LBR_RAISE_MENU:-pot,all_in}"
 SESSION_STATUS_HELPER="$PROJECT_DIR/scripts/slumbot_session_status.py"
 GPU_REGRESSION="${DYYPHOLDEM_UI_GPU_REGRESSION:-1}"
 GRAPH_GATE="${DYYPHOLDEM_UI_GRAPH_GATE:-0}"
@@ -144,10 +151,16 @@ validate_config() {
   fi
   validate_uint DYYPHOLDEM_UI_SEED "$SEED" 0 2147483647
   validate_uint DYYPHOLDEM_UI_OPPONENT_SEED "$OPPONENT_SEED" 0 2147483647
-  [ "$OPPONENT" = "human" ] || [ "$OPPONENT" = "random" ] || [ "$OPPONENT" = "slumbot" ] || {
-    echo "DYYPHOLDEM_UI_OPPONENT must be human, random, or slumbot" >&2
+  [ "$OPPONENT" = "human" ] || [ "$OPPONENT" = "random" ] || [ "$OPPONENT" = "slumbot" ] || [ "$OPPONENT" = "lbr" ] || {
+    echo "DYYPHOLDEM_UI_OPPONENT must be human, random, slumbot, or lbr" >&2
     return 1
   }
+  if [ "$LBR_MODE" = 1 ]; then
+    [ "$SESSIONS" = 1 ] || { echo "DYYPHOLDEM_UI_SESSIONS must be 1 for the lbr opponent" >&2; return 1; }
+    case "$LBR_RAISE_MENU" in
+      *[!a-z_,]*) echo "DYYPHOLDEM_LBR_RAISE_MENU must be a comma list of half_pot,pot,double_pot,all_in" >&2; return 1 ;;
+    esac
+  fi
   [ "$GPU_REGRESSION" = 0 ] || [ "$GPU_REGRESSION" = 1 ] || {
     echo "DYYPHOLDEM_UI_GPU_REGRESSION must be 0 or 1" >&2
     return 1
@@ -204,9 +217,11 @@ verify_play_ui_bundle() {
     return 1
   }
   if [ "$SLUMBOT_MODE" = 1 ]; then
-    for relative in scripts/start_slumbot_remote.sh scripts/validate_slumbot_benchmark.py \
-        scripts/slumbot_session_status.py scripts/slumbot_run_report.py \
-        src/player/dyypholdem_slumbot_player.py src/player/slumbot_match.py src/server/slumbot_game.py; do
+    headless_components="scripts/start_slumbot_remote.sh scripts/validate_slumbot_benchmark.py scripts/slumbot_session_status.py scripts/slumbot_run_report.py src/player/dyypholdem_slumbot_player.py src/player/slumbot_match.py src/server/slumbot_game.py"
+    if [ "$LBR_MODE" = 1 ]; then
+      headless_components="scripts/start_lbr_remote.sh scripts/validate_lbr_benchmark.py scripts/slumbot_session_status.py scripts/slumbot_run_report.py src/player/lbr_acpc_player.py src/player/local_best_response.py src/player/dyypholdem_acpc_player.py acpc_server/dealer"
+    fi
+    for relative in $headless_components; do
       [ -s "$PROJECT_DIR/$relative" ] || {
         echo "missing Slumbot benchmark component: $relative" >&2
         return 1
@@ -575,7 +590,7 @@ validate_random_completion() {
 
 local_slumbot_summary() {
   # Prints: status hands_completed hands_attempted finished_sessions
-  "$LOCAL_PYTHON" "$SESSION_STATUS_HELPER" --run-dir "$LOCAL_RUN_DIR" --sessions "$SESSIONS" 2>/dev/null
+  "$LOCAL_PYTHON" "$SESSION_STATUS_HELPER" --run-dir "$LOCAL_RUN_DIR" --sessions "$SESSIONS" --summary-name "$SUMMARY_NAME" 2>/dev/null
 }
 
 slumbot_process_state() {
@@ -587,9 +602,14 @@ slumbot_process_state() {
 validate_slumbot_completion() {
   [ "$SLUMBOT_MODE" = 1 ] || return 0
   [ "$REMOTE_READY" = 1 ] && [ -s "$SSH_CONFIG" ] || return 1
+  if [ "$LBR_MODE" = 1 ]; then
+    validation_command="python3 /root/dyypholdem/scripts/validate_lbr_benchmark.py --run-dir /root/dyypholdem/runs/play-ui/$RUN_NAME --hands '$HANDS'"
+  else
+    validation_command="python3 /root/dyypholdem/scripts/validate_slumbot_benchmark.py --run-dir /root/dyypholdem/runs/play-ui/$RUN_NAME --hands '$HANDS' --sessions '$SESSIONS'"
+  fi
   for _ in $(seq 1 3); do
     if ssh -n -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=10 dyyui \
-        "python3 /root/dyypholdem/scripts/validate_slumbot_benchmark.py --run-dir /root/dyypholdem/runs/play-ui/$RUN_NAME --hands '$HANDS' --sessions '$SESSIONS'"
+        "$validation_command"
     then
       return 0
     fi
@@ -686,7 +706,11 @@ PY
 
 if [ "$COMMAND" = "dry-run" ]; then
   validate_config
-  if [ "$SLUMBOT_MODE" = 1 ]; then
+  if [ "$LBR_MODE" = 1 ]; then
+    dry_run_service="none; local ACPC dealer only"
+    dry_run_solver="real ACPC dealer + ContinualResolving publishing full-hand strategies, 1,000 CFR iterations"
+    dry_run_opponent="lbr (local best response, call-down, raise menu $LBR_RAISE_MENU, $HANDS hands, dealer seed $SEED)"
+  elif [ "$SLUMBOT_MODE" = 1 ]; then
     dry_run_service="none; the bot connects out to https://slumbot.com/api"
     dry_run_solver="ContinualResolving versus Slumbot's public HUNL API, 1,000 CFR iterations"
     dry_run_opponent="slumbot ($HANDS hands over $SESSIONS concurrent session(s), bot seed $SEED, no web bundle required)"
@@ -731,7 +755,13 @@ if [ "$COMMAND" = "status" ] || [ "$COMMAND" = "logs" ] || [ "$COMMAND" = "stop"
     [ -s "$LOCAL_RUN_DIR/timing_report.txt" ] && sed -n '1,240p' "$LOCAL_RUN_DIR/timing_report.txt"
     [ -s "$LOCAL_RUN_DIR/safe-events.jsonl" ] && tail -20 "$LOCAL_RUN_DIR/safe-events.jsonl"
     [ -s "$LOCAL_RUN_DIR/slumbot-events.jsonl" ] && tail -20 "$LOCAL_RUN_DIR/slumbot-events.jsonl"
-    [ -d "$LOCAL_RUN_DIR/session-0" ] && "$LOCAL_PYTHON" "$PROJECT_DIR/scripts/slumbot_run_report.py" --run-dir "$LOCAL_RUN_DIR"
+    if [ -d "$LOCAL_RUN_DIR/session-0" ]; then
+      if [ -s "$LOCAL_RUN_DIR/session-0/lbr-summary.json" ]; then
+        "$LOCAL_PYTHON" "$PROJECT_DIR/scripts/slumbot_run_report.py" --run-dir "$LOCAL_RUN_DIR" --summary-name lbr-summary.json --events-name lbr-events.jsonl
+      else
+        "$LOCAL_PYTHON" "$PROJECT_DIR/scripts/slumbot_run_report.py" --run-dir "$LOCAL_RUN_DIR"
+      fi
+    fi
     exit 0
   fi
   load_credentials
@@ -787,7 +817,9 @@ if [ -s "$CURRENT_MANIFEST" ]; then
   fi
 fi
 
-if [ "$SLUMBOT_MODE" = 1 ]; then
+if [ "$LBR_MODE" = 1 ]; then
+  RUN_NAME="dyypholdem-lbr-$(date -u +%Y%m%dT%H%M%SZ)"
+elif [ "$SLUMBOT_MODE" = 1 ]; then
   RUN_NAME="dyypholdem-slumbot-$(date -u +%Y%m%dT%H%M%SZ)"
 else
   RUN_NAME="dyypholdem-ui-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -811,7 +843,7 @@ import json
 import sys
 
 pods = json.load(open(sys.argv[1]))
-print("\n".join(str(pod.get("id") or "") for pod in pods if str(pod.get("name") or "").startswith(("dyypholdem-ui-", "dyypholdem-slumbot-"))))
+print("\n".join(str(pod.get("id") or "") for pod in pods if str(pod.get("name") or "").startswith(("dyypholdem-ui-", "dyypholdem-slumbot-", "dyypholdem-lbr-"))))
 PY
 )"
 [ -z "$existing_ui_pods" ] || {
@@ -957,8 +989,13 @@ if [ "$GRAPH_GATE" = 1 ]; then
 fi
 
 if [ "$SLUMBOT_MODE" = 1 ]; then
-  echo "starting real continual resolver against Slumbot"
-  "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_UI_MPS='$MPS'; cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED' '$SESSIONS'"
+  if [ "$LBR_MODE" = 1 ]; then
+    echo "starting dealer, strategy-publishing resolver, and local best response"
+    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_LBR_RAISE_MENU='$LBR_RAISE_MENU'; cd /root/dyypholdem && ./scripts/start_lbr_remote.sh '$RUN_NAME' '$HANDS' '$SEED'"
+  else
+    echo "starting real continual resolver against Slumbot"
+    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_UI_MPS='$MPS'; cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED' '$SESSIONS'"
+  fi
 else
   echo "starting dealer, authenticated UI, and real continual resolver"
   "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD); cd /root/dyypholdem && ./scripts/start_play_ui_remote.sh '$RUN_NAME' '$HANDS' '$SEED' /root/dyypholdem/session-token '$OPPONENT' '$OPPONENT_SEED'"

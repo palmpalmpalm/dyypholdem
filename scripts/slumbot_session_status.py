@@ -26,10 +26,10 @@ def load_summary(path: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def aggregate(run_dir: Path, sessions: int) -> dict[str, object]:
+def aggregate(run_dir: Path, sessions: int, summary_name: str = "slumbot-summary.json") -> dict[str, object]:
     summaries = []
     for directory in session_dirs(run_dir, sessions):
-        summary = load_summary(directory / "slumbot-summary.json")
+        summary = load_summary(directory / summary_name)
         if summary is not None:
             summaries.append(summary)
     statuses = [str(summary.get("status")) for summary in summaries]
@@ -56,10 +56,11 @@ def main() -> None:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--sessions", type=int, required=True)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--summary-name", default="slumbot-summary.json")
     args = parser.parse_args()
     if not 1 <= args.sessions <= 16:
         raise SystemExit("sessions must be between 1 and 16")
-    result = aggregate(args.run_dir, args.sessions)
+    result = aggregate(args.run_dir, args.sessions, args.summary_name)
     if result["readable_sessions"] == 0:
         raise SystemExit(1)
     if args.json:
