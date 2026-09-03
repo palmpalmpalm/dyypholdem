@@ -92,6 +92,30 @@ def merged_summary(directories: list[Path], summary_name: str = "slumbot-summary
     }
 
 
+def paired_comparison(winnings: list[int], baselines: list[float]) -> dict[str, float | int | None]:
+    """Agreement and variance reduction of the server baseline against raw chips."""
+    count = len(winnings)
+    if count < 2 or len(baselines) != count:
+        return {"hands": count, "correlation": None, "variance_ratio": None,
+                "mean_difference_mbb": None, "ci95_difference_mbb": None}
+    factor = 1000.0 / BIG_BLIND
+    raw_stdev = statistics.stdev(winnings)
+    baseline_stdev = statistics.stdev(baselines)
+    raw_mean = statistics.fmean(winnings)
+    baseline_mean = statistics.fmean(baselines)
+    covariance = sum((float(a) - raw_mean) * (b - baseline_mean) for a, b in zip(winnings, baselines)) / (count - 1)
+    differences = [float(a) - b for a, b in zip(winnings, baselines)]
+    difference_se = statistics.stdev(differences) / math.sqrt(count) * factor
+    denominator = raw_stdev * baseline_stdev
+    return {
+        "hands": count,
+        "correlation": covariance / denominator if denominator > 0 else None,
+        "variance_ratio": (raw_stdev ** 2) / (baseline_stdev ** 2) if baseline_stdev > 0 else None,
+        "mean_difference_mbb": statistics.fmean(differences) * factor,
+        "ci95_difference_mbb": 1.96 * difference_se,
+    }
+
+
 def build_report(run_dir: Path, summary_name: str = "slumbot-summary.json", events_name: str = "slumbot-events.jsonl") -> dict:
     directories = session_directories(run_dir)
     events = []
@@ -105,6 +129,14 @@ def build_report(run_dir: Path, summary_name: str = "slumbot-summary.json", even
     started = [row for row in events if row.get("event") == "hand_started"]
     winnings = [int(row["winnings"]) for row in results]
     stats = hand_statistics(winnings)
+    baselines = [row.get("baseline_winnings") for row in results]
+    baseline_available = bool(results) and all(
+        isinstance(value, (int, float)) and not isinstance(value, bool) for value in baselines
+    )
+    baseline_stats = hand_statistics([float(value) for value in baselines]) if baseline_available else None
+    baseline_comparison = (
+        paired_comparison(winnings, [float(value) for value in baselines]) if baseline_available else None
+    )
 
     wall_seconds = None
     if started and results:
@@ -144,6 +176,8 @@ def build_report(run_dir: Path, summary_name: str = "slumbot-summary.json", even
         "bet_size_corrections": summary.get("bet_size_corrections"),
         "action_counts": summary.get("action_counts"),
         "statistics": stats,
+        "baseline_statistics": baseline_stats,
+        "baseline_comparison": baseline_comparison,
         "decisions": len(decisions),
         "decisions_per_hand": len(decisions) / len(results) if results else None,
         "match_wall_seconds": wall_seconds,
@@ -174,6 +208,19 @@ def render_markdown(report: dict) -> str:
         f"| Bot decisions (per hand) | {fmt(report['decisions'])} ({fmt(report['decisions_per_hand'])}) |",
         f"| Net chips | {fmt(stats['chips'])} |",
         f"| Result | {fmt(stats.get('mbb_per_hand'))} mbb/hand, SE {fmt(stats.get('se_mbb'))}, 95% CI ±{fmt(stats.get('ci95_mbb'))} |",
+    ]
+    baseline = report.get("baseline_statistics")
+    comparison = report.get("baseline_comparison") or {}
+    if baseline:
+        lines += [
+            f"| Baseline score | {fmt(baseline.get('mbb_per_hand'))} mbb/hand, "
+            f"95% CI ±{fmt(baseline.get('ci95_mbb'))} |",
+            f"| Baseline vs raw | variance ratio {fmt(comparison.get('variance_ratio'), 2)}, "
+            f"correlation {fmt(comparison.get('correlation'), 3)} |",
+            f"| Raw minus baseline | {fmt(comparison.get('mean_difference_mbb'))} mbb/hand, "
+            f"95% CI ±{fmt(comparison.get('ci95_difference_mbb'))} |",
+        ]
+    lines += [
         f"| Hands won / lost / tied | {fmt(stats.get('wins'))} / {fmt(stats.get('losses'))} / {fmt(stats.get('ties'))} |",
         f"| Small blind hands (chips) | {fmt(report['seat_counts']['small_blind'])} ({fmt(report['seat_chips']['small_blind'])}) |",
         f"| Big blind hands (chips) | {fmt(report['seat_counts']['big_blind'])} ({fmt(report['seat_chips']['big_blind'])}) |",

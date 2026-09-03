@@ -12,7 +12,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 
 import settings.constants as constants  # noqa: E402
-from player.slumbot_match import SlumbotMatch, match_statistics  # noqa: E402
+from player.slumbot_match import SlumbotMatch, match_statistics, paired_statistics  # noqa: E402
 from server.protocol_to_node import Action  # noqa: E402
 from server.slumbot_game import SlumbotProtocolError, SlumbotTransportError  # noqa: E402
 
@@ -84,10 +84,17 @@ class ListWriter:
         self.events.append(event)
 
 
-def response(action, client_pos=1, board=None, winnings=None, token="tok"):
+def response(action, client_pos=1, board=None, winnings=None, token="tok",
+             baseline_winnings=None, bot_hole_cards=None, won_pot=None):
     payload = {"token": token, "action": action, "client_pos": client_pos, "hole_cards": ["Ad", "6h"], "board": board or []}
     if winnings is not None:
         payload["winnings"] = winnings
+        if baseline_winnings is not None:
+            payload["baseline_winnings"] = baseline_winnings
+        if bot_hole_cards is not None:
+            payload["bot_hole_cards"] = bot_hole_cards
+        if won_pot is not None:
+            payload["won_pot"] = won_pot
     return payload
 
 
@@ -141,6 +148,63 @@ class SlumbotMatchTest(unittest.TestCase):
         self.assertEqual(sum(1 for event in telemetry if event["event"] == "decision"), 2)
         self.assertEqual([event["event"] for event in events][:3], ["hand_started", "bet_size_correction", "hand_result"])
         self.assertNotIn("Ad", json.dumps(events))
+
+    def test_baseline_score_is_recorded_alongside_the_raw_result(self):
+        hands = [
+            [response(""), response("b300f", winnings=100, baseline_winnings=250,
+                                    bot_hole_cards=["Kc", "5h"], won_pot=300)],
+            [response("b300", client_pos=0),
+             response("b300f", client_pos=0, winnings=-100, baseline_winnings=-40,
+                      bot_hole_cards=["7d", "6h"], won_pot=-300)],
+        ]
+        actions = [Action(action=constants.ACPCActions.rraise, raise_amount=300),
+                   Action(action=constants.ACPCActions.fold)]
+        _, summary, events, telemetry, _, _ = self.run_match(hands, actions, 2)
+
+        self.assertEqual(summary["cumulative_winnings"], 0)
+        self.assertAlmostEqual(summary["cumulative_baseline_winnings"], 210.0)
+        self.assertAlmostEqual(summary["baseline_statistics"]["mbb_per_hand"], 105.0 * 10)
+        self.assertEqual(summary["baseline_comparison"]["hands"], 2)
+
+        # The opponent's cards stay in the private telemetry, never in events.
+        hand_results = [event for event in telemetry if event["event"] == "hand_result"]
+        self.assertEqual([event["baseline_winnings"] for event in hand_results], [250, -40])
+        self.assertEqual(hand_results[0]["bot_hole_cards"], ["Kc", "5h"])
+        self.assertEqual([event["won_pot"] for event in hand_results], [300, -300])
+        safe = [event for event in events if event["event"] == "hand_result"]
+        self.assertEqual([event["baseline_winnings"] for event in safe], [250, -40])
+        self.assertNotIn("bot_hole_cards", json.dumps(events))
+        self.assertNotIn("Kc", json.dumps(events))
+
+    def test_missing_baseline_disables_the_baseline_score_instead_of_mixing(self):
+        hands = [
+            [response(""), response("b300f", winnings=100, baseline_winnings=250)],
+            [response("b300", client_pos=0), response("b300f", client_pos=0, winnings=-100)],
+        ]
+        actions = [Action(action=constants.ACPCActions.rraise, raise_amount=300),
+                   Action(action=constants.ACPCActions.fold)]
+        _, summary, _, _, _, _ = self.run_match(hands, actions, 2)
+
+        self.assertEqual(summary["cumulative_winnings"], 0)
+        self.assertIsNone(summary["cumulative_baseline_winnings"])
+        self.assertIsNone(summary["baseline_statistics"])
+        self.assertIsNone(summary["baseline_comparison"])
+
+    def test_paired_statistics_measure_agreement_and_variance_reduction(self):
+        # A perfect control variate: baseline equals raw minus a zero-mean term.
+        raw = [1000, -1000, 500, -500, 200, -200]
+        baseline = [900, -900, 450, -450, 180, -180]
+        stats = paired_statistics(raw, baseline)
+        self.assertEqual(stats["hands"], 6)
+        self.assertAlmostEqual(stats["correlation"], 1.0, places=9)
+        self.assertGreater(stats["variance_ratio"], 1.0)
+        self.assertAlmostEqual(stats["stdev_ratio"], 1 / 0.9, places=9)
+        self.assertAlmostEqual(stats["mean_difference_mbb"], 0.0)
+
+    def test_paired_statistics_are_unavailable_without_matching_samples(self):
+        self.assertIsNone(paired_statistics([], [])["correlation"])
+        self.assertIsNone(paired_statistics([1, 2, 3], [1, 2])["variance_ratio"])
+        self.assertIsNone(paired_statistics([5], [5])["stdev_ratio"])
 
     def test_failed_hand_is_retried_and_counted(self):
         hands = [

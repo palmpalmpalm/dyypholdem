@@ -62,6 +62,53 @@ def match_statistics(hand_winnings: list[int]) -> dict[str, float | int | None]:
     }
 
 
+def paired_statistics(
+    hand_winnings: list[int], baseline_winnings: list[float]
+) -> dict[str, float | int | None]:
+    """Compare the raw chip result against Slumbot's variance-reduced baseline.
+
+    ``mean_difference_mbb`` is the paired mean of raw minus baseline. The
+    baseline is only usable as a score if that difference is consistent with
+    zero, so it is reported with its own paired standard error rather than
+    assumed.
+    """
+    count = len(hand_winnings)
+    unavailable = {
+        "hands": count,
+        "correlation": None,
+        "variance_ratio": None,
+        "stdev_ratio": None,
+        "mean_difference_mbb": None,
+        "standard_error_difference_mbb": None,
+        "ci95_difference_mbb": None,
+    }
+    if count < 2 or len(baseline_winnings) != count:
+        return unavailable
+    mbb_factor = 1000.0 / BIG_BLIND
+    raw_stdev = statistics.stdev(hand_winnings)
+    baseline_stdev = statistics.stdev(baseline_winnings)
+    differences = [float(a) - float(b) for a, b in zip(hand_winnings, baseline_winnings)]
+    difference_stdev = statistics.stdev(differences)
+    standard_error = difference_stdev / math.sqrt(count) * mbb_factor
+    raw_mean = statistics.fmean(hand_winnings)
+    baseline_mean = statistics.fmean(baseline_winnings)
+    covariance = sum(
+        (float(a) - raw_mean) * (float(b) - baseline_mean)
+        for a, b in zip(hand_winnings, baseline_winnings)
+    ) / (count - 1)
+    denominator = raw_stdev * baseline_stdev
+    correlation = covariance / denominator if denominator > 0 else None
+    return {
+        "hands": count,
+        "correlation": correlation,
+        "variance_ratio": (raw_stdev ** 2) / (baseline_stdev ** 2) if baseline_stdev > 0 else None,
+        "stdev_ratio": raw_stdev / baseline_stdev if baseline_stdev > 0 else None,
+        "mean_difference_mbb": statistics.fmean(differences) * mbb_factor,
+        "standard_error_difference_mbb": standard_error,
+        "ci95_difference_mbb": 1.96 * standard_error,
+    }
+
+
 class SlumbotMatch:
     def __init__(
         self,
@@ -100,6 +147,9 @@ class SlumbotMatch:
         self.hand_errors = 0
         self.cumulative_winnings = 0
         self.hand_winnings: list[int] = []
+        self.cumulative_baseline_winnings = 0.0
+        self.hand_baseline_winnings: list[float] = []
+        self.baseline_available = True
         self.decisions = 0
         self.action_counts: Counter[str] = Counter()
         self.street_counts: Counter[str] = Counter()
@@ -144,6 +194,17 @@ class SlumbotMatch:
             "hand_errors": self.hand_errors,
             "cumulative_winnings": self.cumulative_winnings,
             "statistics": match_statistics(self.hand_winnings),
+            "cumulative_baseline_winnings": (
+                self.cumulative_baseline_winnings if self.baseline_available else None
+            ),
+            "baseline_statistics": (
+                match_statistics(self.hand_baseline_winnings) if self.baseline_available else None
+            ),
+            "baseline_comparison": (
+                paired_statistics(self.hand_winnings, self.hand_baseline_winnings)
+                if self.baseline_available
+                else None
+            ),
             "decisions": self.decisions,
             "action_counts": dict(sorted(self.action_counts.items())),
             "street_decision_counts": dict(sorted(self.street_counts.items())),
@@ -235,6 +296,8 @@ class SlumbotMatch:
             "final_action": response.get("action"),
             "board": "".join(str(card) for card in (response.get("board") or [])),
             "bot_hole_cards": response.get("bot_hole_cards"),
+            "baseline_winnings": response.get("baseline_winnings"),
+            "won_pot": response.get("won_pot"),
         }
 
     def run(self) -> int:
@@ -276,6 +339,12 @@ class SlumbotMatch:
                 self.decisions += int(result["decisions"])
                 self.cumulative_winnings += int(result["winnings"])
                 self.hand_winnings.append(int(result["winnings"]))
+                baseline = result["baseline_winnings"]
+                if isinstance(baseline, (int, float)) and not isinstance(baseline, bool):
+                    self.cumulative_baseline_winnings += float(baseline)
+                    self.hand_baseline_winnings.append(float(baseline))
+                else:
+                    self.baseline_available = False
                 self.corrections += int(result["corrections"])
                 self.seat_counts["small_blind" if result["client_pos"] == 1 else "big_blind"] += 1
                 if self.telemetry_writer is not None:
@@ -291,6 +360,8 @@ class SlumbotMatch:
                             "final_action": result["final_action"],
                             "board": result["board"],
                             "bot_hole_cards": result["bot_hole_cards"],
+                            "baseline_winnings": result["baseline_winnings"],
+                            "won_pot": result["won_pot"],
                             "hand_seconds": float(result["seconds"]),
                         }
                     )
@@ -304,6 +375,8 @@ class SlumbotMatch:
                         "client_pos": result["client_pos"],
                         "final_action": result["final_action"],
                         "board": result["board"],
+                        "baseline_winnings": result["baseline_winnings"],
+                        "won_pot": result["won_pot"],
                         "hand_seconds": round(float(result["seconds"]), 6),
                     }
                 )
