@@ -558,3 +558,80 @@ These comparisons are deterministic regression evidence, not an exploitability
 measurement. Exploitability, LBR, or another best-response evaluation remains
 necessary before claiming that a quality-changing iteration policy preserves
 playing strength.
+
+## Indexed bucketing (`DYYPHOLDEM_BUCKETING=indexed`)
+
+The next-street value box converts hand ranges to bucket ranges and bucket
+values back to hand values. Both directions were dense matrix multiplies
+against a `hand_count x (board_count * bucket_count)` matrix that holds a single
+`1.0` per (hand, board) and is 99.91% zeros — on the flop, 1326 x 49000, 260 MB,
+read twice per CFR iteration to perform what is a lookup. `indexed` stores the
+same map as a flat column index plus a validity mask and replaces the matmuls
+with a scatter and a gather.
+
+Why it is worth doing: profiling a flop resolve puts 97.7% of CFR time in
+`_compute_terminal_equities`, 95% of that in the value box, and 86% of *that* in
+these two transforms. The neural network forward is 11%.
+
+### Measured on CPU, 200 iterations
+
+Speedups depend on thread count, so both are given. "Harness" is
+`solver_regression capture/compare` with its default single thread and separate
+processes per mode; "threaded" is a full resolve using every core. Both discard
+a warmup resolve — an earlier measurement that did not was inflated by one-time
+bucketing initialisation and reported 5.27x on the flop and 6.68x on preflop,
+which are wrong.
+
+| Spot | Harness (1 thread) | Threaded | Action disagreement |
+|---|---:|---:|---:|
+| preflop-root | 1.07x | 1.05x | 0 |
+| flop-3cAdKc | 3.52x | 4.16x | 0 |
+| turn-3c5h4h3h | 1.99x | 2.30x | 0 |
+| river-7d7c8s5sQd | 0.93x | 1.00x | 0 |
+
+Preflop gains almost nothing because its auxiliary box uses a far smaller
+transform, and the river has no next-street box at all, so it is untouched and
+bitwise identical. The win is concentrated on the flop and turn, which is where
+the live decision cost is: flop response averaged 6.05 s and turn 3.81 s in
+`dyypholdem-slumbot-20260902T185503Z`.
+
+Transform memory drops from 520 MB to 0.78 MB per value box, which bears
+directly on how many concurrent sessions fit on one GPU.
+
+### Why it cannot use the bitwise gate
+
+Both forms sum the same products in a different order, so they agree to about
+one unit in the last place of float32 rather than exactly. The forward sums the
+hands inside a bucket and is exact wherever a bucket holds one hand; the reverse
+sums one term per board and is always a multi-term reduction. Running the
+default thresholds therefore fails, as it should:
+
+```
+flop-3cAdKc: strategy max absolute delta 0.000671058893 exceeds 1e-06
+flop-3cAdKc: CFV max absolute delta 0.194335938 exceeds 0.0001
+turn-3c5h4h3h: strategy max absolute delta 1.8030405e-06 exceeds 1e-06
+```
+
+The gate for this change is therefore explicit and looser on magnitudes while
+staying strict on the thing that decides play:
+
+```shell
+python3 scripts/solver_regression.py capture ... --bucketing dense   --output dense.json
+python3 scripts/solver_regression.py capture ... --bucketing indexed --output indexed.json
+python3 scripts/solver_regression.py compare \
+  --baseline dense.json --candidate indexed.json \
+  --max-strategy-abs-delta 1e-3 --max-strategy-weighted-l1 1e-3 \
+  --max-cfv-abs-delta 0.5 --max-weighted-cfv-rmse 0.05 \
+  --max-root-ev-delta 5e-3 \
+  --max-action-disagreement-fraction 0.0 --max-action-disagreement-weight 0.0
+```
+
+The measured values sit well inside those bounds (flop strategy 6.7e-04, CFV
+0.194, root EV 5.3e-04), and **action disagreement is exactly zero on every
+spot**: no hand's best action changes on any street. That is the property worth
+gating on. The magnitudes are float32 rounding amplified over 200 iterations,
+not a different algorithm.
+
+The mode is off by default. It has not yet run on CUDA, so the on-pod gate must
+still confirm that `index_add_`/`index_select` capture correctly inside CUDA
+Graphs and that the same tolerances hold there.

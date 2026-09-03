@@ -1308,6 +1308,7 @@ def capture_snapshot(
     threads: int,
     device: str = "cpu",
     cuda_graph_mode: str = "off",
+    bucketing_mode: str = "dense",
 ) -> dict[str, object]:
     if iterations < 2:
         raise RegressionError("iterations must be at least 2")
@@ -1339,6 +1340,7 @@ def capture_snapshot(
     sys.path.insert(0, str(source_dir))
     os.environ["DYYPHOLDEM_COMPACT_MODEL_PATH"] = str(model_root)
     os.environ["DYYPHOLDEM_CUDA_GRAPHS"] = cuda_graph_mode
+    os.environ["DYYPHOLDEM_BUCKETING"] = bucketing_mode
 
     import torch
     import settings.arguments as arguments
@@ -1448,6 +1450,7 @@ def capture_snapshot(
             "threads": threads,
             "cuda_graph_mode": cuda_graph_mode,
             "cfr_variant": str(getattr(arguments, "cfr_variant", "cfr+")),
+            "bucketing_mode": str(getattr(arguments, "bucketing_mode", "dense")),
             "cuda_graph_eager_warmups": int(
                 getattr(arguments, "cuda_graph_eager_warmups", 3)
             ),
@@ -2362,6 +2365,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="off",
         help="CUDA Graph replay mode for every street (default: off)",
     )
+    capture_parser.add_argument(
+        "--bucketing",
+        choices=("dense", "indexed"),
+        default="dense",
+        help="next-street bucketing transform (default: dense)",
+    )
     capture_parser.add_argument("--output", type=Path, required=True)
 
     compare_parser = subparsers.add_parser(
@@ -2435,6 +2444,7 @@ def main() -> int:
                 args.threads,
                 args.device,
                 args.cuda_graphs,
+                args.bucketing,
             )
             _write_json(args.output, payload)
             print(
