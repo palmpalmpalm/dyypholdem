@@ -115,6 +115,12 @@ def summarise(raw: list[float], baseline: list[float]) -> dict:
         "variance_ratio": (raw_sd ** 2) / (baseline_sd ** 2) if baseline_sd > 0 else None,
         "raw_sd_chips": raw_sd,
         "baseline_sd_chips": baseline_sd,
+        "difference_sd_chips": difference_sd,
+        # raw - baseline is the control-variate form. It only beats the raw
+        # score when the two are correlated enough to pay for the baseline's
+        # own variance: rho > sd_baseline / (2 * sd_raw).
+        "correlation_needed": baseline_sd / (2 * raw_sd) if raw_sd > 0 else None,
+        "control_variate_variance_ratio": (raw_sd ** 2) / (difference_sd ** 2) if difference_sd > 0 else None,
     }
 
 
@@ -172,8 +178,13 @@ def main() -> int:
     print(f"  raw           {report['raw_mbb']:+10.1f} mbb/hand  +-{report['raw_ci95_mbb']:.1f}   sd {report['raw_sd_chips']:.0f} chips")
     print(f"  baseline      {report['baseline_mbb']:+10.1f} mbb/hand  +-{report['baseline_ci95_mbb']:.1f}   sd {report['baseline_sd_chips']:.0f} chips")
     print(f"  raw-baseline  {report['difference_mbb']:+10.1f} mbb/hand  +-{report['difference_ci95_mbb']:.1f}  <- must contain zero")
-    print(f"  correlation   {report['correlation']:.3f}")
-    print(f"  variance ratio {report['variance_ratio']:.2f}x  -> hands needed drop by that factor")
+    print(f"  correlation   {report['correlation']:.3f} (needs > {report['correlation_needed']:.3f} for raw-baseline to help)")
+    for label, ratio in (("baseline as the score", report["variance_ratio"]),
+                         ("raw-baseline as the score", report["control_variate_variance_ratio"])):
+        if ratio is None:
+            continue
+        verdict = f"{ratio:.2f}x fewer hands" if ratio > 1 else f"{1 / ratio:.2f}x MORE hands"
+        print(f"  {label:26s} variance ratio {ratio:5.2f}  -> {verdict}")
     return 0
 
 
