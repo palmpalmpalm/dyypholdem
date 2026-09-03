@@ -112,6 +112,7 @@ class NextRoundValue(object):
             self._street = nrv._street
             self.bucket_count = nrv.bucket_count
             self.board_count = nrv.board_count
+            self._bucket_flat_index = None
             self._range_matrix = nrv._range_matrix.clone()
             self._range_matrix_board_view = self._range_matrix.view(game_settings.hand_count, self.board_count, self.bucket_count)
             self._reverse_value_matrix = nrv._reverse_value_matrix.clone()
@@ -171,6 +172,7 @@ class NextRoundValue(object):
             _BUCKETING_TRANSFORM_CACHE.clear()
 
     def _use_bucketing_transform(self, transform):
+        self._bucket_flat_index = None
         self._street = transform.street
         self.bucket_count = transform.bucket_count
         self.board_count = transform.board_count
@@ -188,6 +190,7 @@ class NextRoundValue(object):
 
         arguments.timer.split_start("Initialize bucketing for next round in neural network", log_level="TRACE")
 
+        self._bucket_flat_index = None
         street = card_tools.board_to_street(board)
         self._street = street
         self.bucket_count = bucketer.get_bucket_count(street+1)
@@ -383,10 +386,72 @@ class NextRoundValue(object):
     # -- @param bucket_range a vector in which to store the output probabilities
     # --  over buckets
     # -- @local
+    def _ensure_bucket_indices(self):
+        """Derive the scatter/gather form of the bucketing map.
+
+        ``_range_matrix`` holds a single 1.0 per (hand, board) at the hand's
+        bucket, or nothing at all when the board blocks the hand. That is a
+        lookup table stored as a matrix, so the same map is exactly a flat
+        column index plus a validity mask.
+        """
+        if getattr(self, "_bucket_flat_index", None) is not None:
+            return
+        board_view = self._range_matrix.view(
+            game_settings.hand_count, self.board_count, self.bucket_count
+        )
+        weights, buckets = board_view.max(dim=2)
+        valid = weights > 0
+        offsets = (
+            torch.arange(self.board_count, device=buckets.device, dtype=torch.long)
+            * self.bucket_count
+        )
+        flat = buckets.long() + offsets.view(1, self.board_count)
+        # Blocked hands must contribute nothing in either direction; parking
+        # them on their board's first column keeps the index in range and the
+        # mask removes their contribution.
+        flat = torch.where(valid, flat, offsets.view(1, self.board_count))
+        self._bucket_valid = valid.to(self._range_matrix.dtype)
+        # (board, hand) layout: the scatter adds one hand per board, and the
+        # gather reads one bucket per board before summing over boards.
+        self._bucket_flat_index = flat.t().contiguous()
+        self._bucket_valid_t = self._bucket_valid.t().contiguous()
+        self._bucket_scatter_index = self._bucket_flat_index.reshape(-1)
+        # The dense reverse matmul scales every element by 1/den before summing
+        # over columns. Folding the constant into the mask keeps that operation
+        # order, which is what makes the indexed reverse bitwise identical.
+        weight = float(self._reverse_value_matrix.max())
+        self._bucket_reverse_scale = self._bucket_valid_t.mul(weight)
+
     def _card_range_to_bucket_range(self, card_range, bucket_range=None):
+        if arguments.bucketing_mode == "indexed":
+            return self._card_range_to_bucket_range_indexed(card_range, bucket_range)
         if bucket_range is None:
             return torch.mm(card_range, self._range_matrix)
         return torch.mm(card_range, self._range_matrix, out=bucket_range)
+
+    def _card_range_to_bucket_range_indexed(self, card_range, bucket_range=None):
+        self._ensure_bucket_indices()
+        rows = card_range.size(0)
+        if bucket_range is None:
+            bucket_range = card_range.new_empty(rows, self.board_count * self.bucket_count)
+        bucket_range.zero_()
+        # One masked copy of the range per board, scattered onto that board's
+        # bucket columns. 49 x 1326 entries per row instead of a 65M matmul.
+        source = card_range.unsqueeze(1).mul(self._bucket_valid_t.unsqueeze(0))
+        bucket_range.index_add_(1, self._bucket_scatter_index, source.reshape(rows, -1))
+        return bucket_range
+
+    def _bucket_value_to_card_value_indexed(self, bucket_value, card_value=None):
+        self._ensure_bucket_indices()
+        rows = bucket_value.size(0)
+        gathered = bucket_value.index_select(1, self._bucket_scatter_index)
+        gathered = gathered.view(rows, self.board_count, game_settings.hand_count)
+        gathered = gathered.mul(self._bucket_reverse_scale.unsqueeze(0))
+        result = gathered.sum(dim=1)
+        if card_value is None:
+            return result
+        card_value.copy_(result)
+        return card_value
 
     # --- Converts a value vector over buckets to a value vector over private hands.
     # -- @param bucket_value a value vector over buckets
@@ -395,6 +460,8 @@ class NextRoundValue(object):
     #
     # -- @local
     def _bucket_value_to_card_value(self, bucket_value, card_value=None):
+        if arguments.bucketing_mode == "indexed":
+            return self._bucket_value_to_card_value_indexed(bucket_value, card_value)
         if card_value is None:
             return torch.mm(bucket_value, self._reverse_value_matrix)
         return torch.mm(bucket_value, self._reverse_value_matrix, out=card_value)

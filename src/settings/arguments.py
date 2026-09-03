@@ -106,6 +106,14 @@ cuda_graph_eager_warmups = 3
 # discounts accumulated (non-negative) regrets after iteration t by
 # t^alpha / (t^alpha + 1) with alpha = 1.5 (Brown & Sandholm 2019), including
 # the CFR-D gadget regrets; averaging keeps the skip-based uniform window.
+# Bucketing transform for the next-street value box. The published solver
+# multiplies by a hand_count x (board_count * bucket_count) matrix of 1.0
+# indicators that is over 99.9% zeros -- on the flop that is 260 MB read twice
+# per CFR iteration to do work that is a lookup. "indexed" replaces both
+# directions with a scatter and a gather over the same mapping.
+bucketing_mode = os.environ.get("DYYPHOLDEM_BUCKETING", "dense").strip().lower()
+if bucketing_mode not in ("dense", "indexed"):
+    raise RuntimeError("DYYPHOLDEM_BUCKETING must be dense or indexed")
 cfr_variant = os.environ.get("DYYPHOLDEM_CFR_VARIANT", "cfr+").strip().lower()
 if cfr_variant not in ("cfr+", "dcfr"):
     raise RuntimeError("DYYPHOLDEM_CFR_VARIANT must be cfr+ or dcfr")
