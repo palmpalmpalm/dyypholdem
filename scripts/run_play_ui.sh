@@ -1008,7 +1008,10 @@ if [ "$GRAPH_GATE" = 1 ]; then
     "${SSH[@]}" dyyui "export DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING'; cd /root/dyypholdem && timeout 3600s python3 scripts/solver_regression.py capture --device cuda --cuda-graphs $graph_mode --iterations ${CFR_ITERS:-$DEFAULT_CFR_ITERS} --skip-iterations ${CFR_SKIP_ITERS:-$(( ${CFR_ITERS:-$DEFAULT_CFR_ITERS} / 2 ))} --warmups 1 --repeats 3 --threads 1 --output runs/play-ui/$RUN_NAME/graph-gate-$graph_mode.json > runs/play-ui/$RUN_NAME/graph-gate-$graph_mode.log 2>&1"
   done
   "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 scripts/solver_regression.py compare --baseline runs/play-ui/$RUN_NAME/graph-gate-off.json --candidate runs/play-ui/$RUN_NAME/graph-gate-required.json --require-bitwise --max-runtime-ratio 1.10 --output runs/play-ui/$RUN_NAME/graph-gate-comparison.json > runs/play-ui/$RUN_NAME/graph-gate-comparison.log 2>&1"
-  "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 -c 'import json; p=json.load(open(\"runs/play-ui/$RUN_NAME/graph-gate-required.json\")); spots=p[\"spots\"]; assert len(spots) >= 4, len(spots); [None for s in spots for r in s[\"timing\"][\"solver_repeats\"] if not (r.get(\"cuda_graph_used\") is True and r.get(\"cuda_graph_reason\") == \"enabled\")] if False else None; bad=[(s[\"name\"], r.get(\"cuda_graph_reason\")) for s in spots for r in s[\"timing\"].get(\"solver_repeats\", []) if r.get(\"cuda_graph_used\") is not True]; assert not bad, bad'"
+  # Prove every warmup and measured solve replayed a graph. Required mode already
+  # fails on fallback inside the capture; the artifact has to say so on every
+  # sample as well, at the path the harness actually writes.
+  "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 -c 'import json; p=json.load(open(\"runs/play-ui/$RUN_NAME/graph-gate-required.json\")); spots=p[\"spots\"]; assert len(spots) >= 4, len(spots); bad=[(s[\"name\"], r.get(\"cuda_graph_reason\")) for s in spots for r in s[\"cuda_graph\"][\"warmups\"] + s[\"cuda_graph\"][\"measured_repeats\"] if r.get(\"cuda_graph_used\") is not True]; assert not bad, bad'"
   MATCH_CUDA_GRAPHS="auto"
   echo "CUDA Graph gate passed on every public node; the match will run with DYYPHOLDEM_CUDA_GRAPHS=auto"
 fi

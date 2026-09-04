@@ -225,6 +225,22 @@ class RunPlayUiLauncherTests(unittest.TestCase):
             with self.subTest(line=line[:80]):
                 self.assertIn("DYYPHOLDEM_BUCKETING='$MATCH_BUCKETING'", line)
 
+    def test_pod_gate_assertions_read_the_telemetry_path_the_harness_writes(self):
+        """A gate that inspects a key the capture never emits passes vacuously.
+
+        The graph gate once read timing.solver_repeats, which does not exist,
+        so its fallback default made the check a no-op. Per-solve graph
+        telemetry lives under cuda_graph.warmups and cuda_graph.measured_repeats.
+        """
+        source = LAUNCHER.read_text()
+        self.assertNotIn("solver_repeats", source)
+        checks = [line for line in source.splitlines() if "cuda_graph_used" in line]
+        self.assertGreaterEqual(len(checks), 2, "expected the graph gate and the bucketing gate")
+        for line in checks:
+            with self.subTest(line=line.strip()[:60]):
+                self.assertIn('[\\"cuda_graph\\"][\\"warmups\\"]', line)
+                self.assertIn('[\\"cuda_graph\\"][\\"measured_repeats\\"]', line)
+
     def test_remote_start_scripts_record_the_bucketing_mode(self):
         import json as json_module
         import re
