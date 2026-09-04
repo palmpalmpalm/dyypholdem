@@ -39,6 +39,7 @@ LBR_RAISE_MENU="${DYYPHOLDEM_LBR_RAISE_MENU:-pot,all_in}"
 SESSION_STATUS_HELPER="$PROJECT_DIR/scripts/slumbot_session_status.py"
 GPU_REGRESSION="${DYYPHOLDEM_UI_GPU_REGRESSION:-1}"
 GRAPH_GATE="${DYYPHOLDEM_UI_GRAPH_GATE:-0}"
+BUCKETING_GATE="${DYYPHOLDEM_UI_BUCKETING_GATE:-0}"
 OPPONENT_BET_SIZING="${DYYPHOLDEM_OPPONENT_BET_SIZING:-}"
 # Mirrors the shipped default in src/settings/arguments.py so the on-pod gate
 # validates the iteration count the match will actually run.
@@ -48,6 +49,9 @@ CFR_SKIP_ITERS="${DYYPHOLDEM_CFR_SKIP_ITERS:-}"
 # Graph replay is the runtime default; DYYPHOLDEM_UI_GRAPH_GATE=1 additionally
 # proves it bitwise on this pod before the match starts.
 MATCH_CUDA_GRAPHS="auto"
+# dense is the shipped default in src/settings/arguments.py; DYYPHOLDEM_UI_BUCKETING_GATE=1
+# is the only way to run indexed on a pod, and only after the gate promotes it.
+MATCH_BUCKETING="dense"
 MPS="${DYYPHOLDEM_UI_MPS:-0}"
 MODEL_ROOT="${DYYPHOLDEM_COMPACT_MODEL_PATH:-$PROJECT_DIR/runs/model-recovery/compact}"
 HTTP_PORT=8000
@@ -174,6 +178,10 @@ validate_config() {
   }
   [ "$GRAPH_GATE" = 0 ] || [ "$GRAPH_GATE" = 1 ] || {
     echo "DYYPHOLDEM_UI_GRAPH_GATE must be 0 or 1" >&2
+    return 1
+  }
+  [ "$BUCKETING_GATE" = 0 ] || [ "$BUCKETING_GATE" = 1 ] || {
+    echo "DYYPHOLDEM_UI_BUCKETING_GATE must be 0 or 1" >&2
     return 1
   }
   [ "$MPS" = 0 ] || [ "$MPS" = 1 ] || {
@@ -742,6 +750,7 @@ if [ "$COMMAND" = "dry-run" ]; then
     "  telemetry: private JSONL plus safe live/final per-street reports" \
     "  GPU regression: $GPU_REGRESSION (strict preflop root/chance tensors before UI start)" \
     "  CUDA Graph gate: $GRAPH_GATE (bitwise off-versus-required capture on all public nodes; match uses auto mode only if it passes)" \
+    "  bucketing gate: $BUCKETING_GATE (dense-versus-indexed capture under required graph replay on all public nodes; match uses indexed only if it passes the documented tolerances with zero action disagreement)" \
     "  opponent bet sizing: ${OPPONENT_BET_SIZING:-default pot-only tree}" \
     "  NVIDIA MPS for concurrent sessions: $MPS" \
     "  CFR iterations: ${CFR_ITERS:-$DEFAULT_CFR_ITERS} with ${CFR_SKIP_ITERS:-half} skipped" \
@@ -1004,13 +1013,29 @@ if [ "$GRAPH_GATE" = 1 ]; then
   echo "CUDA Graph gate passed on every public node; the match will run with DYYPHOLDEM_CUDA_GRAPHS=auto"
 fi
 
+if [ "$BUCKETING_GATE" = 1 ]; then
+  echo "running fail-closed bucketing gate: dense versus indexed under required graph replay on all public nodes"
+  for bucketing_mode in dense indexed; do
+    "${SSH[@]}" dyyui "export DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING'; cd /root/dyypholdem && timeout 3600s python3 scripts/solver_regression.py capture --device cuda --cuda-graphs required --bucketing $bucketing_mode --iterations ${CFR_ITERS:-$DEFAULT_CFR_ITERS} --skip-iterations ${CFR_SKIP_ITERS:-$(( ${CFR_ITERS:-$DEFAULT_CFR_ITERS} / 2 ))} --warmups 1 --repeats 3 --threads 1 --output runs/play-ui/$RUN_NAME/bucketing-gate-$bucketing_mode.json > runs/play-ui/$RUN_NAME/bucketing-gate-$bucketing_mode.log 2>&1"
+  done
+  # Indexed reorders the same sums, so it cannot be bitwise; these are the tolerances
+  # documented in docs/solver-regression.md, strict on the thing that decides play.
+  "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 scripts/solver_regression.py compare --baseline runs/play-ui/$RUN_NAME/bucketing-gate-dense.json --candidate runs/play-ui/$RUN_NAME/bucketing-gate-indexed.json --max-strategy-abs-delta 1e-3 --max-strategy-weighted-l1 1e-3 --max-cfv-abs-delta 0.5 --max-weighted-cfv-rmse 0.05 --max-root-ev-delta 5e-3 --max-action-disagreement-fraction 0.0 --max-action-disagreement-weight 0.0 --max-runtime-ratio 1.10 --output runs/play-ui/$RUN_NAME/bucketing-gate-comparison.json > runs/play-ui/$RUN_NAME/bucketing-gate-comparison.log 2>&1"
+  # Prove each capture ran the mode its name claims and replayed graphs on every solve.
+  "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 -c 'import json; snapshots=[(m, json.load(open(\"runs/play-ui/$RUN_NAME/bucketing-gate-%s.json\" % m))) for m in (\"dense\", \"indexed\")]; wrong=[(m, p[\"configuration\"].get(\"bucketing_mode\")) for m, p in snapshots if p[\"configuration\"].get(\"bucketing_mode\") != m]; assert not wrong, wrong; assert all(len(p[\"spots\"]) >= 4 for _, p in snapshots), [len(p[\"spots\"]) for _, p in snapshots]; bad=[(m, s[\"name\"], r.get(\"cuda_graph_reason\")) for m, p in snapshots for s in p[\"spots\"] for r in s[\"cuda_graph\"][\"warmups\"] + s[\"cuda_graph\"][\"measured_repeats\"] if r.get(\"cuda_graph_used\") is not True]; assert not bad, bad'"
+  # Report the measured per-spot speedup (baseline over candidate) to the controller log.
+  "${SSH[@]}" dyyui "cd /root/dyypholdem && python3 -c 'import json; p=json.load(open(\"runs/play-ui/$RUN_NAME/bucketing-gate-comparison.json\")); print(\"bucketing gate speedups: \" + \", \".join(\"%s %.2fx\" % (s[\"name\"], s[\"timing\"][\"speedup\"]) for s in p[\"spots\"]))'"
+  MATCH_BUCKETING="indexed"
+  echo "bucketing gate passed on every public node; the match will run with DYYPHOLDEM_BUCKETING=indexed"
+fi
+
 if [ "$SLUMBOT_MODE" = 1 ]; then
   if [ "$LBR_MODE" = 1 ]; then
     echo "starting dealer, strategy-publishing resolver, and local best response"
-    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_LBR_RAISE_MENU='$LBR_RAISE_MENU' DYYPHOLDEM_LBR_DEVICE='${DYYPHOLDEM_LBR_DEVICE:-cpu}' DYYPHOLDEM_CFR_ITERS='$CFR_ITERS' DYYPHOLDEM_CFR_SKIP_ITERS='$CFR_SKIP_ITERS'; cd /root/dyypholdem && ./scripts/start_lbr_remote.sh '$RUN_NAME' '$HANDS' '$SEED'"
+    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_BUCKETING='$MATCH_BUCKETING' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_LBR_RAISE_MENU='$LBR_RAISE_MENU' DYYPHOLDEM_LBR_DEVICE='${DYYPHOLDEM_LBR_DEVICE:-cpu}' DYYPHOLDEM_CFR_ITERS='$CFR_ITERS' DYYPHOLDEM_CFR_SKIP_ITERS='$CFR_SKIP_ITERS'; cd /root/dyypholdem && ./scripts/start_lbr_remote.sh '$RUN_NAME' '$HANDS' '$SEED'"
   else
     echo "starting real continual resolver against Slumbot"
-    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_UI_MPS='$MPS' DYYPHOLDEM_CFR_ITERS='$CFR_ITERS' DYYPHOLDEM_CFR_SKIP_ITERS='$CFR_SKIP_ITERS'; cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED' '$SESSIONS'"
+    "${SSH[@]}" dyyui "export DYYPHOLDEM_COMPACT_MODEL_PATH=/root/dyypholdem/runs/model-recovery/compact DYYPHOLDEM_SOURCE_COMMIT=$(git -C "$PROJECT_DIR" rev-parse HEAD) DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS' DYYPHOLDEM_BUCKETING='$MATCH_BUCKETING' DYYPHOLDEM_OPPONENT_BET_SIZING='$OPPONENT_BET_SIZING' DYYPHOLDEM_UI_MPS='$MPS' DYYPHOLDEM_CFR_ITERS='$CFR_ITERS' DYYPHOLDEM_CFR_SKIP_ITERS='$CFR_SKIP_ITERS'; cd /root/dyypholdem && ./scripts/start_slumbot_remote.sh '$RUN_NAME' '$HANDS' '$SEED' '$SESSIONS'"
   fi
 else
   echo "starting dealer, authenticated UI, and real continual resolver"

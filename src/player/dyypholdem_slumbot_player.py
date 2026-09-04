@@ -68,6 +68,7 @@ if __name__ == '__main__':
                 "cuda_runtime": torch.version.cuda,
                 "gpu_name": gpu_name,
                 "cfr_iterations": arguments.cfr_iters,
+                "bucketing_mode": arguments.bucketing_mode,
                 "cfr_skip_iterations": arguments.cfr_skip_iters,
                 "bot_seed": args.seed,
                 "opponent": "slumbot",

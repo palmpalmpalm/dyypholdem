@@ -87,6 +87,7 @@ cat > "$RUN_DIR/environment.json" <<EOF2
   "opponent": "lbr",
   "lbr_raise_menu": "$LBR_RAISE_MENU",
   "lbr_device": "$LBR_DEVICE",
+  "bucketing": "${DYYPHOLDEM_BUCKETING:-dense}",
   "dealer_ports": [18901, 18902]
 }
 EOF2

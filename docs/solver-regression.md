@@ -635,3 +635,25 @@ not a different algorithm.
 The mode is off by default. It has not yet run on CUDA, so the on-pod gate must
 still confirm that `index_add_`/`index_select` capture correctly inside CUDA
 Graphs and that the same tolerances hold there.
+
+### On-pod gate
+
+`DYYPHOLDEM_UI_BUCKETING_GATE=1` is that confirmation, and it is the only way to
+run indexed on a pod. Before a hand is dealt the launcher captures both modes on
+the four public nodes at the match's own iteration count under `--cuda-graphs
+required`, compares them with exactly the seven tolerances above, and asserts
+that each capture reports the `bucketing_mode` its filename claims and that
+every warmup and measured solve replayed a graph rather than falling back. Only
+then does the match run with `DYYPHOLDEM_BUCKETING=indexed`; any failure exits
+non-zero and aborts the launch, so a pod never plays a mode the gate has not
+cleared. The run directory keeps `bucketing-gate-dense.json`,
+`bucketing-gate-indexed.json`, and `bucketing-gate-comparison.json` with a `.log`
+beside each, and the measured per-spot speedups are echoed to the controller log.
+
+The mode that actually played is recorded independently of the knob:
+`environment.json` carries a `bucketing` field, and every initialization and
+decision telemetry record carries `bucketing_mode` next to `cfr_iterations`.
+
+```shell
+DYYPHOLDEM_UI_GRAPH_GATE=1 DYYPHOLDEM_UI_BUCKETING_GATE=1 DYYPHOLDEM_UI_MPS=1 make slumbot-benchmark
+```

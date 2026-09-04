@@ -90,6 +90,7 @@ cat > "$RUN_DIR/environment.json" <<EOF2
   "opponent": "slumbot",
   "opponent_host": "slumbot.com",
   "mps": "$MPS_STATUS",
+  "bucketing": "${DYYPHOLDEM_BUCKETING:-dense}",
   "cpu_cores": $CPU_CORES,
   "threads_per_session": $THREADS_PER_SESSION
 }

@@ -148,6 +148,19 @@ class RunPlayUiLauncherTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
 
+    def test_bucketing_gate_flag_is_reported_and_validated(self):
+        env = os.environ.copy()
+        env.update({"DYYPHOLDEM_UI_OPPONENT": "slumbot", "DYYPHOLDEM_UI_BUCKETING_GATE": "1"})
+        result = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True, env=env)
+        self.assertIn("bucketing gate: 1", result.stdout)
+        default = subprocess.run([str(LAUNCHER), "dry-run"], check=True, capture_output=True, text=True)
+        self.assertIn("bucketing gate: 0", default.stdout)
+        env = os.environ.copy()
+        env["DYYPHOLDEM_UI_BUCKETING_GATE"] = "yes"
+        result = subprocess.run([str(LAUNCHER), "dry-run"], check=False, capture_output=True, text=True, env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("DYYPHOLDEM_UI_BUCKETING_GATE must be 0 or 1", result.stderr)
+
     def test_lbr_mode_dry_run_and_validation(self):
         env = os.environ.copy()
         env.update({"DYYPHOLDEM_UI_OPPONENT": "lbr", "DYYPHOLDEM_UI_HANDS": "1000", "DYYPHOLDEM_UI_SEED": "20260905"})
@@ -178,6 +191,70 @@ class RunPlayUiLauncherTests(unittest.TestCase):
         self.assertIsNotNone(shipped, "arguments.py has no default iteration count")
         self.assertEqual(fallback.group(1), shipped.group(1))
         self.assertNotIn("${CFR_ITERS:-1000}", source)
+
+    def test_bucketing_gate_tolerances_match_the_documented_gate(self):
+        """Indexed reorders the same sums, so the gate is explicit, not bitwise."""
+        source = LAUNCHER.read_text()
+        capture = [line for line in source.splitlines() if "bucketing-gate-$bucketing_mode.json" in line]
+        self.assertEqual(len(capture), 1, "launcher has no bucketing gate capture")
+        self.assertIn("for bucketing_mode in dense indexed; do", source)
+        self.assertIn("--cuda-graphs required", capture[0])
+        self.assertIn("--bucketing $bucketing_mode", capture[0])
+        compare = [line for line in source.splitlines() if "bucketing-gate-comparison.json" in line and " compare " in line]
+        self.assertEqual(len(compare), 1, "launcher has no bucketing gate comparison")
+        self.assertNotIn("--require-bitwise", compare[0])
+        documented = (PROJECT_ROOT / "docs" / "solver-regression.md").read_text()
+        for flag in (
+            "--max-strategy-abs-delta 1e-3",
+            "--max-strategy-weighted-l1 1e-3",
+            "--max-cfv-abs-delta 0.5",
+            "--max-weighted-cfv-rmse 0.05",
+            "--max-root-ev-delta 5e-3",
+            "--max-action-disagreement-fraction 0.0",
+            "--max-action-disagreement-weight 0.0",
+        ):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, compare[0])
+                self.assertIn(flag, documented)
+
+    def test_every_pod_launch_line_carries_the_bucketing_mode(self):
+        """The bots read the mode at import, so no launch may leave it unset."""
+        launches = [line for line in LAUNCHER.read_text().splitlines() if "DYYPHOLDEM_CUDA_GRAPHS='$MATCH_CUDA_GRAPHS'" in line]
+        self.assertGreaterEqual(len(launches), 2)
+        for line in launches:
+            with self.subTest(line=line[:80]):
+                self.assertIn("DYYPHOLDEM_BUCKETING='$MATCH_BUCKETING'", line)
+
+    def test_remote_start_scripts_record_the_bucketing_mode(self):
+        import json as json_module
+        import re
+
+        for name in ("start_slumbot_remote.sh", "start_lbr_remote.sh"):
+            with self.subTest(script=name):
+                source = (PROJECT_ROOT / "scripts" / name).read_text()
+                self.assertIn('"bucketing": "${DYYPHOLDEM_BUCKETING:-dense}"', source)
+                body = re.search(r'cat > "\$RUN_DIR/environment\.json" <<EOF2\n(.*?)\nEOF2\n', source, re.DOTALL)
+                self.assertIsNotNone(body, f"{name} has no environment.json heredoc")
+                # Every expansion stands in as 1 so the commas can be checked as JSON.
+                expanded = re.sub(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*", "1", body.group(1))
+                self.assertEqual(json_module.loads(expanded)["bucketing"], "1")
+
+    def test_decision_telemetry_records_the_bucketing_mode(self):
+        """environment.json alone cannot prove which mode each decision used."""
+        records = 0
+        for relative in (
+            "src/lookahead/continual_resolving.py",
+            "src/player/dyypholdem_slumbot_player.py",
+            "src/player/dyypholdem_acpc_player.py",
+        ):
+            lines = (PROJECT_ROOT / relative).read_text().splitlines()
+            for index, line in enumerate(lines):
+                if line.strip() != '"cfr_iterations": arguments.cfr_iters,':
+                    continue
+                records += 1
+                with self.subTest(source=relative, line=index + 1):
+                    self.assertEqual(lines[index + 1].strip(), '"bucketing_mode": arguments.bucketing_mode,')
+        self.assertEqual(records, 4)
 
     def test_cfr_iteration_knob_is_reported_and_validated(self):
         env = os.environ.copy()
