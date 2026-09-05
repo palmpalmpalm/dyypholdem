@@ -205,11 +205,11 @@ class RunPlayUiLauncherTests(unittest.TestCase):
         self.assertNotIn("--require-bitwise", compare[0])
         documented = (PROJECT_ROOT / "docs" / "solver-regression.md").read_text()
         for flag in (
-            "--max-strategy-abs-delta 1e-3",
-            "--max-strategy-weighted-l1 1e-3",
-            "--max-cfv-abs-delta 0.5",
-            "--max-weighted-cfv-rmse 0.05",
-            "--max-root-ev-delta 5e-3",
+            "--max-strategy-abs-delta 0.2",
+            "--max-strategy-weighted-l1 1e-2",
+            "--max-cfv-abs-delta 100",
+            "--max-weighted-cfv-rmse 0.7",
+            "--max-root-ev-delta 0.1",
             "--max-action-disagreement-fraction 0.0",
             "--max-action-disagreement-weight 0.0",
         ):

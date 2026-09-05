@@ -612,29 +612,66 @@ flop-3cAdKc: CFV max absolute delta 0.194335938 exceeds 0.0001
 turn-3c5h4h3h: strategy max absolute delta 1.8030405e-06 exceeds 1e-06
 ```
 
-The gate for this change is therefore explicit and looser on magnitudes while
-staying strict on the thing that decides play:
+The gate for this change is therefore explicit: loose enough on magnitudes to
+admit float32 reordering, strict on the thing that decides play:
 
 ```shell
 python3 scripts/solver_regression.py capture ... --bucketing dense   --output dense.json
 python3 scripts/solver_regression.py capture ... --bucketing indexed --output indexed.json
 python3 scripts/solver_regression.py compare \
   --baseline dense.json --candidate indexed.json \
-  --max-strategy-abs-delta 1e-3 --max-strategy-weighted-l1 1e-3 \
-  --max-cfv-abs-delta 0.5 --max-weighted-cfv-rmse 0.05 \
-  --max-root-ev-delta 5e-3 \
+  --max-strategy-abs-delta 0.2 --max-strategy-weighted-l1 1e-2 \
+  --max-cfv-abs-delta 100 --max-weighted-cfv-rmse 0.7 \
+  --max-root-ev-delta 0.1 \
   --max-action-disagreement-fraction 0.0 --max-action-disagreement-weight 0.0
 ```
 
-The measured values sit well inside those bounds (flop strategy 6.7e-04, CFV
-0.194, root EV 5.3e-04), and **action disagreement is exactly zero on every
-spot**: no hand's best action changes on any street. That is the property worth
-gating on. The magnitudes are float32 rounding amplified over 200 iterations,
-not a different algorithm.
+### Calibrating the gate
 
-The mode is off by default. It has not yet run on CUDA, so the on-pod gate must
-still confirm that `index_add_`/`index_select` capture correctly inside CUDA
-Graphs and that the same tolerances hold there.
+The first version of this gate used bounds a hundred times tighter (strategy
+1e-3, CFV 0.5, root EV 5e-3), calibrated on a 200-iteration CPU comparison.
+That was the wrong yardstick, and the first on-pod run
+(`dyypholdem-slumbot-20260904T162553Z`, RTX 4090, 2,000 iterations) failed it
+and aborted before a hand was dealt, at a cost of about $0.15. What that run
+established:
+
+* indexed captures under required graph replay on all four public nodes and is
+  **bit-identical across three repeats on every spot**, so `index_add_` does
+  not introduce run-to-run nondeterminism here;
+* GPU speedups are smaller than on CPU: flop **1.64x**, turn **1.24x**, preflop
+  and river unchanged. The dense matmul is a smaller share of a GPU iteration
+  than the CPU profile suggested;
+* the divergence is float32 reordering amplified by CFR+ over 2,000 iterations,
+  concentrated in low-reach hands near indifference (mixed-strategy hands
+  diverge 8x more than pure ones). On the flop the range-weighted mean strategy
+  change is 0.00175; hands with a change above 0.05 carry 0.12% of range mass;
+  root CFVs move 0.23 chips on average in a 1,200-chip pot; and the single
+  best-action flip is on a hand with zero reach.
+
+The right yardstick is how much the *dense* solver itself moves under the same
+kind of perturbation, so the same four spots were captured dense on CPU at
+2,000 iterations and compared against the pod's dense capture. That pair is the
+shipped algorithm on two BLAS implementations and nothing else:
+
+| Flop, 2,000 iterations | dense CPU vs dense GPU | indexed vs dense, GPU |
+|---|---:|---:|
+| strategy max absolute delta | 0.164 | 0.087 |
+| strategy range-weighted L1 | 9.7e-3 | 3.5e-3 |
+| argmax disagreement weight | 1.1e-3 | **0** |
+| argmax disagreement fraction | 5.1e-3 (4 of 791 hands) | **0** |
+| CFV max absolute delta | 90.2 chips | 36.2 chips |
+| CFV range-weighted RMSE | 0.666 | 0.411 |
+| root EV delta | 0.083 | 0.014 |
+
+The shipped solver moves two to three times further between CPU and GPU than
+indexed moves on the GPU, and it flips best actions on 0.11% of reachable range
+mass where indexed flips none. On the turn the two pairs are the same order of
+magnitude (strategy max 8.7e-3 versus 1.7e-2, weighted L1 5.3e-4 versus
+5.7e-4). The bounds above are therefore that floor with a small margin:
+"no worse than a different device's BLAS", while action disagreement stays at
+zero — a bar the cross-device dense pair does not clear.
+
+The mode is off by default.
 
 ### On-pod gate
 
