@@ -377,6 +377,68 @@ class RunPlayUiLauncherTests(unittest.TestCase):
                 f"{relative} would be uploaded from the local checkout instead of downloaded on the pod",
             )
 
+    def run_remote_ssh(self, ssh_script):
+        """Exercise remote_ssh against a fake ssh defined by ssh_script."""
+        source = LAUNCHER.read_text()
+        marker = "validate_config() {\n"
+        prefix, found, _ = source.partition(marker)
+        self.assertEqual(found, marker)
+        script = (
+            prefix
+            + "SSH_CONFIG=/dev/null\n"
+            + "SSH_CONNECT_RETRY_SECONDS=0\n"
+            + ssh_script
+            # The prefix runs under set -e, so capture the status the way the
+            # launcher's own call sites would have to.
+            + "\nrc=0; remote_ssh dyyui real-command || rc=$?; echo \"remote_ssh exit $rc\"\n"
+        )
+        return subprocess.run(["bash"], input=script, check=False, capture_output=True, text=True)
+
+    def test_remote_ssh_retries_only_connection_failures_and_runs_the_command_once(self):
+        # ssh exits 255 for its own failures. The probe (`true`) fails twice
+        # with 255, then connects; the real command must then run exactly once.
+        result = self.run_remote_ssh(
+            "calls=0\n"
+            "ssh() { calls=$((calls + 1)); last=${@: -1};\n"
+            "  if [ \"$last\" = true ] && [ \"$calls\" -le 2 ]; then return 255; fi\n"
+            "  echo \"ran: $last\"; return 0; }\n"
+        )
+        self.assertEqual(result.stdout.count("ran: real-command"), 1, result.stdout)
+        self.assertIn("remote_ssh exit 0", result.stdout)
+        self.assertEqual(result.stderr.count("failed; retrying"), 2, result.stderr)
+
+    def test_remote_ssh_does_not_retry_a_failed_remote_command(self):
+        # A remote failure is any exit other than 255: it must surface once,
+        # unretried, so a failed gate still aborts the launch.
+        result = self.run_remote_ssh(
+            "runs=0\n"
+            "ssh() { last=${@: -1}; [ \"$last\" = true ] && return 0;\n"
+            "  runs=$((runs + 1)); echo \"ran $runs\"; return 1; }\n"
+        )
+        self.assertEqual(result.stdout.count("ran "), 1, result.stdout)
+        self.assertIn("remote_ssh exit 1", result.stdout)
+        self.assertNotIn("retrying", result.stderr)
+
+    def test_remote_ssh_gives_up_after_bounded_connect_attempts(self):
+        result = self.run_remote_ssh("ssh() { return 255; }\n")
+        self.assertIn("giving up", result.stderr)
+        self.assertIn("remote_ssh exit 255", result.stdout)
+        self.assertEqual(result.stderr.count("failed; retrying"), 6, result.stderr)
+
+    def test_every_pod_command_goes_through_the_connect_probe(self):
+        source = LAUNCHER.read_text()
+        self.assertIn("SSH=(remote_ssh)", source)
+        self.assertIn("SSH_STDIN=(remote_ssh_stdin)", source)
+        # No bare ssh array may bypass the probe once the pod is up.
+        self.assertNotIn('SSH=(ssh ', source)
+        rsyncs = [line for line in source.splitlines() if line.startswith("rsync -az -e")]
+        self.assertGreaterEqual(len(rsyncs), 3)
+        lines = source.splitlines()
+        for index, line in enumerate(lines):
+            if line.startswith("rsync -az -e"):
+                with self.subTest(line=line[:60]):
+                    self.assertEqual(lines[index - 1].strip(), "ssh_connect_probe")
+
     def test_spend_gate_accepts_exact_authorized_boundary(self):
         result = self.run_spend_gate("1.00")
 

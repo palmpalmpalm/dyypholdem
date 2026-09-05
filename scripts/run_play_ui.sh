@@ -147,6 +147,36 @@ print(f"projected maximum compute cost ${projected:.4f} is within authorized ${c
 PY
 }
 
+# ssh reserves exit 255 for its own failures (connect timeout, dropped link),
+# and under set -e one of those aborted a run on 2026-09-05 two minutes into
+# setup. A run with hours invested must survive a transient connect failure; a
+# remote command that fails must still abort it. So every remote command is
+# preceded by an idempotent probe that retries only on 255, and the command
+# itself then runs exactly once with its own status left untouched -- nothing
+# remote is ever executed twice.
+SSH_CONNECT_ATTEMPTS=6
+SSH_CONNECT_RETRY_SECONDS=20
+ssh_connect_probe() {
+  local attempt rc
+  for attempt in $(seq 1 "$SSH_CONNECT_ATTEMPTS"); do
+    rc=0
+    ssh -n -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=15 dyyui true || rc=$?
+    [ "$rc" -eq 255 ] || return 0
+    echo "ssh connect attempt $attempt/$SSH_CONNECT_ATTEMPTS failed; retrying in ${SSH_CONNECT_RETRY_SECONDS}s" >&2
+    sleep "$SSH_CONNECT_RETRY_SECONDS"
+  done
+  echo "ssh connect failed $SSH_CONNECT_ATTEMPTS times; giving up" >&2
+  return 255
+}
+remote_ssh() {
+  ssh_connect_probe || return 255
+  ssh -n -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=15 "$@"
+}
+remote_ssh_stdin() {
+  ssh_connect_probe || return 255
+  ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=15 "$@"
+}
+
 validate_config() {
   validate_uint DYYPHOLDEM_UI_GUARD_SECONDS "$GUARD_SECONDS" 900 21600
   if [ "$SLUMBOT_MODE" = 1 ]; then
@@ -942,8 +972,8 @@ for _ in $(seq 1 120); do
   sleep 5
 done
 [ "$ssh_ready" = 1 ] || { echo "pod never exposed SSH" >&2; exit 1; }
-SSH=(ssh -n -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=15)
-SSH_STDIN=(ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=15)
+SSH=(remote_ssh)
+SSH_STDIN=(remote_ssh_stdin)
 
 connected=0
 for _ in $(seq 1 72); do
@@ -969,6 +999,7 @@ fi
 # Git LFS objects. The pod downloads and checksums them itself through
 # scripts/materialize_assets.py; shipping local copies over the home uplink
 # took 96 minutes on 2026-09-01, so the code sync excludes them.
+ssh_connect_probe
 rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" \
   --exclude .git --exclude .DS_Store --exclude __pycache__ --exclude runs \
   --exclude node_modules --exclude coverage --exclude .vite \
@@ -976,7 +1007,9 @@ rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" \
   "${sync_sources[@]}" \
   dyyui:/root/dyypholdem/
 "${SSH[@]}" dyyui "python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version' && python3 -m pip install --quiet --break-system-packages -r /root/dyypholdem/requirements-play-ui.txt && python3 -c 'import gdown, loguru, pokerkit; from importlib.metadata import version; assert version(\"gdown\") == \"5.2.0\"; assert version(\"loguru\") == \"0.7.3\"; assert version(\"PokerKit\") == \"0.7.5\"' && mkdir -p /root/dyypholdem/runs/model-recovery/compact /root/dyypholdem/runs/play-ui/$RUN_NAME"
+ssh_connect_probe
 rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" "$MODEL_ROOT/" dyyui:/root/dyypholdem/runs/model-recovery/compact/
+ssh_connect_probe
 rsync -az -e "ssh -F $SSH_CONFIG -o BatchMode=yes" "$TOKEN_FILE" dyyui:/root/dyypholdem/session-token
 REMOTE_READY=1
 
