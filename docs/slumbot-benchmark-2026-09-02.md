@@ -260,6 +260,60 @@ an under-raise that is *not* all-in and must still be rejected, and a bet larger
 than the remaining stack. One expectation changed with the fix: an all-in on the
 flop after 300 preflop now encodes as `b19700` rather than `b20000`.
 
+### Run `dyypholdem-slumbot-20260905T034456Z`: indexed bucketing, first live run
+
+The first match with `DYYPHOLDEM_BUCKETING=indexed`, promoted by the on-pod
+gate (`DYYPHOLDEM_UI_BUCKETING_GATE=1`, see docs/solver-regression.md) after the
+CUDA Graph gate; otherwise the shipped defaults (graph replay, 2,000 iterations,
+pot-only tree, four sessions, MPS). Every one of the 6,763 decision records
+carries `bucketing_mode: indexed`. It took four launches to get here: the first
+failed the gate on mis-calibrated tolerances, the next two died to provider-side
+SSH failures before setup finished; the three aborted attempts cost about $0.30
+in total and none dealt a hand.
+
+| Metric | Value |
+|---|---:|
+| Hands completed / requested | 2,400 / 2,400 |
+| Bot decisions (per hand) | 6,763 (2.82) |
+| Net chips | −83,250 |
+| Result | −346.9 mbb/hand, SE 344.5, 95% CI ±675.2 |
+| Hands won / lost / tied | 1,126 / 1,246 / 28 |
+| Small blind hands (chips) | 1,200 (−18,700) |
+| Big blind hands (chips) | 1,200 (−64,550) |
+| Per-hand standard deviation | 1,688 chips (16.9 big blinds) |
+| Hand errors / request retries / bet corrections | 0 / 0 / 0 |
+| Match wall time | 3,973 s (**1.66 s/hand** aggregate; previous run 2.35) |
+
+Latency against the previous run, same iteration count and concurrency:
+
+| Street | Decisions | Response | Previous | p95 | Previous | CFR | Previous | CFR ratio |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| preflop | 2,566 | 0.537 s | 0.993 s | 1.225 s | 2.862 s | 0.475 s | 0.932 s | 1.96x |
+| flop | 2,000 | **3.014 s** | 6.046 s | 4.044 s | 8.035 s | 1.254 s | 4.065 s | **3.24x** |
+| turn | 1,271 | 1.941 s | 3.810 s | 2.599 s | 5.475 s | 1.100 s | 2.892 s | 2.63x |
+| river | 926 | 0.741 s | 1.333 s | 1.037 s | 2.369 s | 0.638 s | 1.232 s | 1.93x |
+
+The flop and turn gains exceed the gate's solo measurements (1.70x and 1.22x),
+and preflop and river sped up almost 2x although the gate measured them at
+exactly 1.00x. That is a contention effect: four sessions time-share one GPU
+under MPS, and indexed removes two 260 MB memory-bound reads per iteration from
+every neighbour's flop and turn solves, so every session's kernels get more
+bandwidth. Some of it may be pod-to-pod variation (this pod had 64 vCPUs
+against 96), but the flop and turn figures are too large for that alone. A
+2,400-hand match now takes 66 minutes instead of 94.
+
+The chip result is inside the noise of every earlier run. The big blind again
+carries the loss (−64,550 of −83,250), the same seat pattern as every run so
+far; that is where the bot checks to the opponent postflop and faces its bets.
+
+Slumbot's `baseline_winnings` was recorded on every hand. Its correlation with
+the raw result for the real bot is 0.587 (an interim read at 429 hands said
+0.70; that was noise), which makes `raw − baseline` a 1.23x variance reduction,
+about 19% fewer hands for the same interval. The baseline's own mean, −44
+mbb/hand ±664, is consistent with zero, which is what it should be if the score
+is Slumbot's own strategy playing the bot's cards. Details in
+docs/variance-reduction-2026-09-03.md.
+
 ### Pooled result on the default tree
 
 Three runs share the shipped pot-only tree (the wide-opponent-menu run is a
@@ -270,12 +324,19 @@ different abstraction and is excluded):
 | `20260901T202522Z` solo, 1,000 iters | 1,000 | −18,350 | −183.5 | ±986.9 |
 | `20260902T031543Z` 4x, 1,000 iters | 2,443 | +15,150 | +62.0 | ±631.9 |
 | `20260902T185503Z` 4x, 2,000 iters | 2,400 | −62,100 | −258.8 | ±568.4 |
-| **Pooled** | **5,843** | **−65,300** | **−111.8** | **±390.9** |
+| `20260905T034456Z` 4x, 2,000 iters, indexed | 2,400 | −83,250 | −346.9 | ±675.2 |
+| **Pooled** | **8,243** | **−148,550** | **−180.2** | **±339.8** |
 
-The interval still contains zero. After 5,843 hands the honest statement is
-unchanged: DyypHoldem is not distinguishable from break-even against Slumbot at
-this sample size. The pooled figure mixes two iteration counts, so it measures
-the default configuration as a lineage rather than any single solver setting.
+The interval still contains zero, so DyypHoldem remains not distinguishable
+from break-even against Slumbot at this sample size — but the point estimate
+has been negative in three runs of four and the pooled figure is drifting that
+way, and the big blind has lost in every run. The pooled figure mixes two
+iteration counts and two numerically-equivalent bucketing implementations, so
+it measures the default configuration as a lineage rather than any single
+solver setting. With the pooled per-hand standard deviation of 1,574 chips,
+±100 mbb/hand needs about 95,000 hands raw, or about 77,000 using the
+baseline as a control variate; at 1.66 s/hand that is roughly 36 GPU-hours,
+about $26.
 
 ## Reading the result
 

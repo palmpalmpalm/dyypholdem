@@ -671,7 +671,28 @@ magnitude (strategy max 8.7e-3 versus 1.7e-2, weighted L1 5.3e-4 versus
 "no worse than a different device's BLAS", while action disagreement stays at
 zero — a bar the cross-device dense pair does not clear.
 
-The mode is off by default.
+### Gate result and live effect
+
+`dyypholdem-slumbot-20260905T034456Z` (RTX 4090, 2,000 iterations) passed the
+calibrated gate with no failures: strategy max delta 8.696e-02 and weighted L1
+3.502e-03 on the flop, root EV delta 1.383e-02, action disagreement exactly
+zero on every spot. Those figures are identical to every printed digit to the
+ones the first, aborted run produced on a different pod, so the
+indexed-versus-dense difference is bitwise reproducible across machines. Solo
+speedups on this pod: flop 1.70x, turn 1.22x, preflop and river 1.00x.
+
+Live, with four sessions under MPS, the effect is larger than the solo numbers:
+aggregate pace 2.35 → **1.66 s/hand** (1.42x), flop response 6.05 → 3.01 s,
+turn 3.81 → 1.94 s, and even the untouched preflop and river streets sped up
+almost 2x because every session's flop and turn solves stopped reading two
+260 MB matrices per iteration. 2,400 hands, zero errors, every decision record
+stamped `indexed`. Full tables in docs/slumbot-benchmark-2026-09-02.md.
+
+The mode is still off by default. On this evidence — a passed hardware gate
+with zero best-action changes, bitwise reproducibility across pods, a clean
+2,400-hand live run, and 520 MB less GPU memory per session — promoting it to
+the shipped default is the recommended next step; that is a defaults decision
+and is left to be taken explicitly.
 
 ### On-pod gate
 

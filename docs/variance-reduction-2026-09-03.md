@@ -74,7 +74,34 @@ and `baseline_comparison`, including the correlation and both variance ratios,
 so the next GPU run measures this for the actual solver at no extra cost. Until
 one has, the raw chip count stays the score.
 
-## If the baseline stays useless
+## Measured on the real bot
+
+`dyypholdem-slumbot-20260905T034456Z` recorded the baseline on all 2,400 hands
+of a real match (indexed bucketing, 2,000 iterations, four sessions):
+
+| Quantity | Value |
+|---|---:|
+| Raw result | −346.9 mbb/hand, 95% CI ±675 (sd 1,688 chips) |
+| Baseline result | −43.8 mbb/hand, 95% CI ±664 (sd 1,659 chips) |
+| Raw minus baseline | −303.1 mbb/hand, 95% CI ±608 (sd 1,520 chips) |
+| Correlation | 0.587 (threshold 0.492) |
+| Variance ratio, raw over (raw − baseline) | 1.23x |
+
+So for the actual solver the baseline does clear the threshold the call-down
+probe missed, and `raw − baseline` is a real but modest saving: about 19%
+fewer hands for the same interval (109,000 → 89,000 for ±100 mbb at this run's
+standard deviation). An interim read at 429 hands showed 0.70; that was
+sampling noise, and 0.587 over 2,400 hands has a standard error near 0.03.
+
+Using it as the score also needs the baseline's expectation to be known. The
+baseline's own mean here is −44 ±664 mbb/hand, consistent with zero, which is
+what seat symmetry predicts if the score is Slumbot's own strategy playing the
+bot's cards with the seats alternating exactly (they do: 1,200 hands in each).
+That reading is plausible and untested at any useful precision, so the raw
+chip count stays the headline score and the baseline-corrected figure is
+reported alongside it.
+
+## If a larger reduction is wanted
 
 A full AIVAT estimator remains available and is now unblocked by
 `bot_hole_cards`. The parts that need only our own strategy and the public
