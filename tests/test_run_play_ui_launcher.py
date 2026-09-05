@@ -438,6 +438,11 @@ class RunPlayUiLauncherTests(unittest.TestCase):
             if line.startswith("rsync -az -e"):
                 with self.subTest(line=line[:60]):
                     self.assertEqual(lines[index - 1].strip(), "ssh_connect_probe")
+        # The periodic copyback rsync lives inside a function and is retried by
+        # the final copy only three times; it must wait out a flaky link first.
+        copyback = source.index("copy_back_once() {")
+        body = source[copyback:source.index("if rsync -az --partial", copyback)]
+        self.assertIn("if ! ssh_connect_probe; then", body)
 
     def test_spend_gate_accepts_exact_authorized_boundary(self):
         result = self.run_spend_gate("1.00")

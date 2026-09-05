@@ -472,6 +472,13 @@ EOF
 copy_back_once() {
   [ "$REMOTE_READY" = 1 ] && [ -s "$SSH_CONFIG" ] || return 2
   mkdir -p "$LOCAL_RUN_DIR"
+  # Three periodic copies failed on 2026-09-05 to transient connect failures;
+  # the final copy gets only three tries before the pod is deleted, so a flaky
+  # link must be waited out here rather than counted as a failed copy.
+  if ! ssh_connect_probe; then
+    COPY_STATUS="failed"
+    return 1
+  fi
   if rsync -az --partial --partial-dir=.rsync-partial --timeout=30 \
       -e "ssh -F $SSH_CONFIG -o BatchMode=yes -o ConnectTimeout=10" \
       "dyyui:/root/dyypholdem/runs/play-ui/$RUN_NAME/" \
