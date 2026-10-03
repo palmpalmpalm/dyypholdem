@@ -9,7 +9,15 @@ from unittest import mock
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "scripts"))
 
-from runpod_ui_pod import DEFAULT_IMAGE, PodNotFound, build_create_payload, cmd_exists, safe_status  # noqa: E402
+from runpod_ui_pod import (  # noqa: E402
+    DEFAULT_IMAGE,
+    USER_AGENT,
+    PodNotFound,
+    build_create_payload,
+    cmd_exists,
+    request,
+    safe_status,
+)
 
 
 class RunPodUiPodTest(unittest.TestCase):
@@ -52,6 +60,16 @@ class RunPodUiPodTest(unittest.TestCase):
         with mock.patch("runpod_ui_pod.request", side_effect=SystemExit("transport error")):
             with self.assertRaisesRegex(SystemExit, "transport error"):
                 cmd_exists(args)
+
+    def test_request_sends_named_user_agent(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"{}"
+        with mock.patch.dict("os.environ", {"RUNPOD_API_KEY": "test-key"}):
+            with mock.patch("runpod_ui_pod.urllib.request.urlopen", return_value=response) as urlopen:
+                request("GET", "/pods/test")
+        sent = urlopen.call_args.args[0]
+        self.assertEqual(sent.get_header("User-agent"), USER_AGENT)
+        self.assertNotIn("Python-urllib", sent.get_header("User-agent"))
 
 
 if __name__ == "__main__":

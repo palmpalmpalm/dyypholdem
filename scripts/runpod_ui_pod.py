@@ -13,6 +13,8 @@ import urllib.request
 
 
 REST_BASE_URL = "https://rest.runpod.io/v1"
+# RunPod's edge rejects urllib's default User-Agent (HTTP 403, Cloudflare 1010).
+USER_AGENT = "dyypholdem-runpod-launcher/1.0"
 # Current image behind RunPod's official ``runpod-torch-v280`` template.
 DEFAULT_IMAGE = "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
 
@@ -34,7 +36,11 @@ def request(method: str, path: str, payload: dict | None = None):
         REST_BASE_URL + path,
         data=body,
         method=method,
-        headers={"Authorization": f"Bearer {api_key()}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key()}",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as response:
